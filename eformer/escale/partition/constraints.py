@@ -155,10 +155,7 @@ def get_names_from_partition_spec(
     return list(names)
 
 
-def with_sharding_constraint(
-    arr: jnp.ndarray,
-    sharding: PartitionSpec | NamedSharding,
-) -> jnp.ndarray:
+def array_with_sharding_constraint(arr: jax.Array, sharding: PartitionSpec | NamedSharding) -> jax.Array:
     """
     Apply sharding constraints with automatic correction based on array shape and mesh.
 
@@ -277,6 +274,53 @@ def with_sharding_constraint(
     with mesh:
         arr = _with_sharding_constraint(arr, final_spec_to_apply)
     return arr
+
+
+def with_sharding_constraint(
+    arr: tp.Any,
+    sharding: PartitionSpec | NamedSharding,
+) -> tp.Any:
+    """
+    Apply sharding constraints with automatic correction based on array shape and mesh.
+
+    This function takes a PyTree of JAX arrays and a sharding specification (PartitionSpec or
+    NamedSharding). It attempts to apply the sharding, but first checks if the
+    specification is compatible with the array's shape and the current mesh configuration.
+
+    If an axis specified in the PartitionSpec:
+      - Does not exist in the mesh,
+      - Corresponds to a mesh axis of size 1, or
+      - Is incompatible with the array's dimension size (not divisible),
+    then that part of the PartitionSpec is automatically corrected to None, effectively
+    preventing sharding along that dimension.
+
+    Args:
+        x: The PyTree of JAX arrays to apply sharding constraints to.
+        sharding: PyTree of the desired sharding specification (PartitionSpec or NamedSharding).
+
+    Returns:
+        The PyTree of JAX arrays with potentially corrected sharding constraints applied.
+    """
+    flat_x, treedef = jax.tree_util.tree_flatten(arr)
+    flat_sharding, other_treedef = jax.tree_util.tree_flatten(sharding)
+
+    if treedef != other_treedef:
+        raise ValueError(
+            f"Input PyTree and sharding specification must have the same structure. "
+            f"Got {treedef} and {other_treedef}."
+        )
+    del other_treedef
+
+    if not all(isinstance(s, (PartitionSpec, NamedSharding)) for s in flat_sharding):
+        raise TypeError(
+            "All elements in the sharding specification must be either PartitionSpec or NamedSharding."
+        )
+
+    flat_x = [
+        array_with_sharding_constraint(arr, sharding)
+        for arr, sharding in zip(flat_x, flat_sharding)
+    ]
+    return jax.tree_util.tree_unflatten(treedef, flat_x)
 
 
 def get_corrected_named_sharding(
