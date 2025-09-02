@@ -4,26 +4,19 @@ build-backend = "uv_build"
 
 [project]
 name = "eformer"
-version = "0.0.47"
+version = "0.0.53"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 description = "(EasyDel Former) is a utility library designed to simplify and enhance the development in JAX"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
-keywords = [
-	"JAX",
-	"Deep Learning",
-	"Machine Learning",
-	"Flax",
-	"XLA",
-	"EasyDeL",
-]
+keywords = ["JAX", "Deep Learning", "XLA", "EasyDeL", "Distributed Computing"]
 classifiers = [
 	"Development Status :: 3 - Alpha",
 	"Intended Audience :: Developers",
 	"Topic :: Scientific/Engineering :: Artificial Intelligence",
 	"License :: OSI Approved :: Apache Software License",
-	"Programming Language :: Python :: 3", 
+	"Programming Language :: Python :: 3",
 	"Programming Language :: Python :: 3.11",
 	"Programming Language :: Python :: 3.12",
 	"Programming Language :: Python :: 3.13",
@@ -39,6 +32,12 @@ dependencies = [
 	"tblib~=3.0.0",
 	"pyyaml~=6.0.2",
 	"contextlib2~=21.6.0",
+	"safetensors>=0.6.2",
+	"tqdm>=4.67.1",
+	"psutil>=7.0.0",
+	"google-cloud-storage>=3.3.0",
+	"tensorstore>=0.1.76",
+	"braceexpand>=0.1.7",
 ]
 
 [project.urls]
@@ -61,12 +60,12 @@ where = ["."]
 
 [tool.black]
 line-length = 121
-target-version = ["py310"]
+target-version = ["py311"]
 preview = true
 
 [tool.ruff]
 line-length = 121
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["A", "B", "E", "F", "I", "NPY", "RUF", "UP", "W"]
@@ -76,7 +75,7 @@ ignore = ["F722", "B008", "UP015", "A005"]
 "__init__.py" = ["E402", "F401"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 ignore_missing_imports = true
 exclude = ["eformer/"]
 

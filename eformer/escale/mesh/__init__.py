@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .creation import create_mesh, parse_mesh_from_string
+from .creation import cpu_context, create_cpu_mesh, create_mesh, force_cpu, parse_mesh_from_string
 from .mesh_helpers import MeshPartitionHelper
 
-__all__ = (
-    "MeshPartitionHelper",
-    "create_mesh",
-    "parse_mesh_from_string",
-)
+__all__ = ("MeshPartitionHelper", "cpu_context", "create_cpu_mesh", "create_mesh", "force_cpu", "parse_mesh_from_string")

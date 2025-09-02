@@ -276,3 +276,65 @@ def create_monitored_function(
         return result, metrics
 
     return monitored_fn
+
+
+def barrier_sync(timeout: float = 200):
+    """Synchronize all JAX processes at a barrier point.
+
+    Blocks execution until all processes in the distributed JAX runtime reach
+    this barrier. This is essential for ensuring consistency across distributed
+    training, especially before/after collective operations or checkpointing.
+
+    The function uses a global counter to create unique barrier names, allowing
+    multiple barriers to be used sequentially without conflicts.
+
+    Args:
+        timeout: Maximum time to wait for all processes to reach the barrier,
+            in seconds. Defaults to 200 seconds (3.33 minutes). If the timeout
+            is exceeded, a RuntimeError will be raised by the underlying JAX
+            distributed client.
+
+    Returns:
+        None
+
+    Raises:
+        RuntimeError: If the JAX distributed client is not initialized. This
+            typically means JAX was not started in distributed mode or the
+            distributed runtime failed to initialize.
+
+    Note:
+        - This function is a no-op when running with a single process
+          (jax.process_count() == 1), allowing code to work seamlessly
+          in both single and multi-process environments.
+        - Each call increments a global counter to ensure unique barrier names,
+          preventing conflicts when multiple barriers are used in sequence.
+        - The timeout is converted to milliseconds for the underlying JAX API.
+
+    Example:
+        >>> # In distributed training
+        >>> model = train_step(model, batch)
+        >>> barrier_sync()  # Wait for all processes
+        >>> if jax.process_index() == 0:
+        ...     save_checkpoint(model)  # Only process 0 saves
+        >>> barrier_sync()  # Wait before continuing
+
+        >>> # With custom timeout for long operations
+        >>> barrier_sync(timeout=600)  # Wait up to 10 minutes
+
+    Warning:
+        Ensure all processes call barrier_sync() the same number of times and
+        in the same order, or deadlocks may occur. Conditional barriers based
+        on process rank should be avoided.
+    """
+    global _sync_counter
+    if jax.process_count() == 1:
+        return
+    import jax._src.distributed as distributed
+
+    client = distributed.global_state.client
+
+    if client is None:
+        raise RuntimeError("barrier_sync requires jax distributed client to be initialized")
+
+    _sync_counter += 1
+    client.wait_at_barrier(f"easy_barrier_sync_{_sync_counter}", timeout_in_ms=int(timeout * 1000.0))

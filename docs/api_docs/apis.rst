@@ -10,8 +10,11 @@ eFormer APIs 🔮
    escale
    executor
    jaximus
+   loggings
    mpric
    ops
    optimizers
+   paths
    pytree
+   serialization
    

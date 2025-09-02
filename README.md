@@ -1,7 +1,7 @@
 # eformer (EasyDel Former)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![JAX](https://img.shields.io/badge/JAX-Compatible-brightgreen)](https://github.com/google/jax)
 [![PyPI version](https://badge.fury.io/py/eformer.svg)](https://badge.fury.io/py/eformer)
 

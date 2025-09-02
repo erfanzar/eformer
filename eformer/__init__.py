@@ -13,7 +13,24 @@
 # limitations under the License.
 
 # pyright: reportUnsupportedDunderAll=none
+from logging import getLogger as _getLogger
 
-__version__ = "0.0.47"
+_getLogger("jax.experimental.array_serialization.serialization").setLevel(40)
 
-__all__ = ("aparser", "callib", "common_types", "escale", "executor", "jaximus", "mpric", "ops", "optimizers", "pytree")
+__version__ = "0.0.53"
+
+__all__ = (
+    "aparser",
+    "callib",
+    "common_types",
+    "escale",
+    "executor",
+    "jaximus",
+    "loggings",
+    "mpric",
+    "ops",
+    "optimizers",
+    "paths",
+    "pytree",
+    "serialization",
+)

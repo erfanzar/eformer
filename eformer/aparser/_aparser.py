@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import dataclasses
 import json
 import os
@@ -25,6 +24,8 @@ from inspect import isclass
 from pathlib import Path
 
 import yaml
+
+from eformer.paths import ePath
 
 DataClass = tp.NewType("DataClass", tp.Any)
 DataClassType = tp.NewType("DataClassType", tp.Any)
@@ -59,7 +60,7 @@ def make_choice_type_function(choices: list[tp.Any]) -> tp.Callable[[str], tp.An
 def Argu(
     *,
     aliases: str | list[str] | None = None,
-    help: str | None = None,  # noqa:A002
+    help: str | None = None,  # noqa
     default: tp.Any = dataclasses.MISSING,
     default_factory: tp.Callable[[], tp.Any] = dataclasses.MISSING,
     metadata: dict | None = None,
@@ -133,8 +134,8 @@ class DataClassArgumentParser(ArgumentParser):
                 origin_type = getattr(field.type, "__origin__", None)
             else:
                 raise ValueError(
-                    f"Only tp.Optional types (tp.Union[T, None]) are supported for field"
-                    f" '{field.name}', got {field.type}."
+                    f"Only tp.Optional types (tp.Union[T, None]) are supported for "
+                    f"field '{field.name}', got {field.type}."
                 )
 
         # Special handling for booleans
@@ -157,7 +158,7 @@ class DataClassArgumentParser(ArgumentParser):
                 kwargs["default"] = field.default
             else:
                 kwargs["required"] = True
-        # Handle list types (expecting at least one value)
+
         elif isclass(field.type) and issubclass(field.type, list):
             kwargs["type"] = field.type.__args__[0]
             kwargs["nargs"] = "+"
@@ -174,10 +175,20 @@ class DataClassArgumentParser(ArgumentParser):
             else:
                 kwargs["required"] = True
 
-        # Add the main argument to the parser
+        # Only process union types that contain None
+        current_type = kwargs["type"]
+        type_args = tp.get_args(current_type)
+
+        if type_args and type(None) in type_args:
+            non_none_args = [arg for arg in type_args if arg is not type(None)]
+
+            if len(non_none_args) == 1:
+                kwargs["type"] = non_none_args[0]
+            elif len(non_none_args) > 1:
+                kwargs["type"] = tp.Union[tuple(non_none_args)]  # noqa:UP007
+
         parser.add_argument(*long_options, *aliases, **kwargs)
 
-        # For boolean fields that default to True, add a complementary --no_* option
         if field.type is bool and field.default is True:
             bool_kwargs["default"] = False
             parser.add_argument(
@@ -305,8 +316,7 @@ class DataClassArgumentParser(ArgumentParser):
         """
         Load a JSON file and parse it into dataclass instances.
         """
-        with open(Path(json_file), encoding="utf-8") as f:
-            data = json.load(f)
+        data = json.loads(ePath(json_file).read_text())
         return self.parse_dict(data, allow_extra_keys=allow_extra_keys)
 
     def parse_yaml_file(

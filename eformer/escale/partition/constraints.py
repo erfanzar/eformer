@@ -155,125 +155,155 @@ def get_names_from_partition_spec(
     return list(names)
 
 
-def array_with_sharding_constraint(arr: jax.Array, sharding: PartitionSpec | NamedSharding) -> jax.Array:
+def with_sharding_constraint(arr: jnp.ndarray | tp.Any, sharding: PartitionSpec | NamedSharding) -> jnp.ndarray | tp.Any:
     """
     Apply sharding constraints with automatic correction based on array shape and mesh.
 
-    This function takes a JAX array and a sharding specification (PartitionSpec or
+    This function takes a JAX array (or PyTree) and a sharding specification (PartitionSpec or
     NamedSharding). It attempts to apply the sharding, but first checks if the
     specification is compatible with the array's shape and the current mesh configuration.
 
     If an axis specified in the PartitionSpec:
       - Does not exist in the mesh,
-      - Corresponds to a mesh axis of size 1, or
       - Is incompatible with the array's dimension size (not divisible),
     then that part of the PartitionSpec is automatically corrected to None, effectively
     preventing sharding along that dimension.
 
+    Note: Mesh axes of size 1 are allowed if divisibility holds, enabling logical
+    sharding even on single-device axes.
+
     Args:
-        arr: The JAX array to apply sharding constraints to.
+        arr: The JAX array or PyTree to apply sharding constraints to.
         sharding: The desired sharding specification (PartitionSpec or NamedSharding).
 
     Returns:
-        The JAX array with potentially corrected sharding constraints applied.
+        The JAX array or PyTree with potentially corrected sharding constraints applied.
     """
-    if not isinstance(arr, jax.Array | jnp.ndarray):
-        return arr
-    if isinstance(sharding, NamedSharding):
-        mesh = sharding.mesh
-        original_spec = sharding.spec
-    elif isinstance(sharding, PartitionSpec):
-        mesh = get_incontext_mesh(False)
-        original_spec = sharding
-    else:
-        raise TypeError(f"Unsupported sharding type: {type(sharding)}")
 
-    if mesh.empty:
-        if LOG_SHARDING_MOVE:
-            warnings.warn(
-                "Attempted to apply sharding constraint with an empty mesh. Constraint ignored.",
-                stacklevel=1,
-            )
-        return arr
+    def _apply_sharding_to_array(array: jnp.ndarray) -> jnp.ndarray:
+        """Helper function to apply sharding to a single array."""
+        if not isinstance(array, jax.Array | jnp.ndarray):
+            return array
 
-    if len(original_spec) == 0:
-        return arr
-    spec_tuple = tuple(original_spec)
-    if len(spec_tuple) < arr.ndim:
-        spec_tuple += (None,) * (arr.ndim - len(spec_tuple))
-    elif len(spec_tuple) > arr.ndim:
-        if LOG_SHARDING_MOVE:
-            warnings.warn(
-                f"PartitionSpec length ({len(spec_tuple)}) exceeds array rank ({arr.ndim}). "
-                f"Truncating spec: {original_spec} -> {spec_tuple[: arr.ndim]}",
-                stacklevel=1,
-            )
-        spec_tuple = spec_tuple[: arr.ndim]
-
-    corrected_spec_list = list(spec_tuple)
-    mesh_axis_names = set(mesh.axis_names)
-
-    for i, axis_spec in enumerate(spec_tuple):
-        if axis_spec is None:
-            continue
-
-        current_axis_names = []
-        if isinstance(axis_spec, str):
-            current_axis_names.append(axis_spec)
-        elif isinstance(axis_spec, tuple):
-            current_axis_names.extend(axis_spec)
+        if isinstance(sharding, NamedSharding):
+            mesh = sharding.mesh
+            original_spec = sharding.spec
+        elif isinstance(sharding, PartitionSpec):
+            mesh = get_incontext_mesh(False)
+            original_spec = sharding
         else:
+            raise TypeError(f"Unsupported sharding type: {type(sharding)}")
+
+        if mesh.empty:
             if LOG_SHARDING_MOVE:
                 warnings.warn(
-                    f"Unexpected element type in PartitionSpec at index {i}: {axis_spec}. Treating as None.",
+                    "Attempted to apply sharding constraint with an empty mesh. Constraint ignored.",
                     stacklevel=1,
                 )
-            corrected_spec_list[i] = None
-            continue
+            return array
 
-        valid_axis = True
-        total_mesh_size_for_dim = 1
-        for axis_name in current_axis_names:
-            if axis_name not in mesh_axis_names:
+        if len(original_spec) == 0:
+            return array
+
+        spec_tuple = tuple(original_spec)
+        if len(spec_tuple) < array.ndim:
+            spec_tuple += (None,) * (array.ndim - len(spec_tuple))
+        elif len(spec_tuple) > array.ndim:
+            if LOG_SHARDING_MOVE:
+                warnings.warn(
+                    f"PartitionSpec length ({len(spec_tuple)}) exceeds array rank ({array.ndim}). "
+                    f"Truncating spec: {original_spec} -> {spec_tuple[: array.ndim]}",
+                    stacklevel=1,
+                )
+            spec_tuple = spec_tuple[: array.ndim]
+
+        corrected_spec_list = list(spec_tuple)
+        mesh_axis_names = set(mesh.axis_names)
+
+        for i, axis_spec in enumerate(spec_tuple):
+            if axis_spec is None:
+                continue
+
+            current_axis_names = []
+            if isinstance(axis_spec, str):
+                current_axis_names.append(axis_spec)
+            elif isinstance(axis_spec, tuple):
+                current_axis_names.extend(axis_spec)
+            else:
                 if LOG_SHARDING_MOVE:
                     warnings.warn(
-                        f"Axis name '{axis_name}' in PartitionSpec {original_spec} at index {i} "
-                        f"not found in mesh axes {mesh_axis_names}. Correcting dimension {i} to None.",
+                        f"Unexpected element type in PartitionSpec at index {i}: {axis_spec}. Treating as None.",
                         stacklevel=1,
                     )
-                valid_axis = False
-                break
-            total_mesh_size_for_dim *= mesh.shape[axis_name]
-        if not valid_axis:
-            corrected_spec_list[i] = None
-            continue
-        if total_mesh_size_for_dim > 0 and arr.shape[i] % total_mesh_size_for_dim != 0:
-            if LOG_SHARDING_MOVE:
-                warnings.warn(
-                    f"Array dimension {i} (size {arr.shape[i]}) is not divisible by the total mesh "
-                    f"size ({total_mesh_size_for_dim}) for axis spec {axis_spec} in {original_spec}. "
-                    f"Correcting to None.",
-                    stacklevel=1,
-                )
-            corrected_spec_list[i] = None
-            continue
-        elif total_mesh_size_for_dim == 0:
-            if LOG_SHARDING_MOVE:
-                warnings.warn(
-                    f"Total mesh axis size for dimension {i} based on spec {axis_spec} resulted in 0. "
-                    f"Correcting to None.",
-                    stacklevel=1,
-                )
-            corrected_spec_list[i] = None
-            continue
-    corrected_spec = PartitionSpec(*corrected_spec_list)
-    if not any(axis is not None for axis in corrected_spec):
-        final_spec_to_apply = PartitionSpec()
-    else:
-        final_spec_to_apply = corrected_spec
-    with mesh:
-        arr = _with_sharding_constraint(arr, final_spec_to_apply)
-    return arr
+                corrected_spec_list[i] = None
+                continue
+
+            valid_axis = True
+            total_mesh_size_for_dim = 1
+            for axis_name in current_axis_names:
+                if axis_name not in mesh_axis_names:
+                    if LOG_SHARDING_MOVE:
+                        warnings.warn(
+                            f"Axis name '{axis_name}' in PartitionSpec {original_spec} at index {i} "
+                            f"not found in mesh axes {mesh_axis_names}. Correcting dimension {i} to None.",
+                            stacklevel=1,
+                        )
+                    valid_axis = False
+                    break
+                total_mesh_size_for_dim *= mesh.shape[axis_name]
+
+            if not valid_axis:
+                corrected_spec_list[i] = None
+                continue
+
+            if total_mesh_size_for_dim > 0 and array.shape[i] % total_mesh_size_for_dim != 0:
+                if LOG_SHARDING_MOVE:
+                    warnings.warn(
+                        f"Array dimension {i} (size {array.shape[i]}) is not divisible by the total mesh "
+                        f"size ({total_mesh_size_for_dim}) for axis spec {axis_spec} in {original_spec}. "
+                        f"Correcting to None.",
+                        stacklevel=1,
+                    )
+                corrected_spec_list[i] = None
+                continue
+            elif total_mesh_size_for_dim == 0:
+                if LOG_SHARDING_MOVE:
+                    warnings.warn(
+                        f"Total mesh axis size for dimension {i} based on spec {axis_spec} resulted in 0. "
+                        f"Correcting to None.",
+                        stacklevel=1,
+                    )
+                corrected_spec_list[i] = None
+                continue
+
+        corrected_spec = PartitionSpec(*corrected_spec_list)
+        if not any(axis is not None for axis in corrected_spec):
+            final_spec_to_apply = PartitionSpec()
+        else:
+            final_spec_to_apply = corrected_spec
+
+        with mesh:
+            array = _with_sharding_constraint(array, final_spec_to_apply)
+        return array
+
+    try:
+        tree_def = jax.tree_util.tree_structure(arr)
+        leaves = jax.tree_util.tree_leaves(arr)
+
+        if len(leaves) == 1 and leaves[0] is arr:
+            return _apply_sharding_to_array(arr)
+        else:
+
+            def apply_to_leaf(leaf):
+                if isinstance(leaf, jax.Array | jnp.ndarray):
+                    return _apply_sharding_to_array(leaf)
+                return leaf
+
+            sharded_leaves = [apply_to_leaf(leaf) for leaf in leaves]
+            return jax.tree_util.tree_unflatten(tree_def, sharded_leaves)
+
+    except Exception:
+        return _apply_sharding_to_array(arr)
 
 
 def with_sharding_constraint(
@@ -463,6 +493,7 @@ def match_partition_rules(
     rules: list[tuple[str, PartitionSpec]],
     tree: dict,
     min_size: int | None = 0,
+    strict: bool = True,
 ) -> dict:
     """
     Match partition rules to parameters based on their names.
@@ -470,16 +501,32 @@ def match_partition_rules(
     This function takes a list of partition rules (regular expressions and
     corresponding `PartitionSpec`) and applies them to a dictionary of parameters
     based on their names. It's useful for automatically defining sharding strategies.
+    The order of keys in the output dictionary matches the input tree's key order.
 
     Args:
-            rules: A list of tuples, where each tuple contains:
-                             - A regular expression to match parameter names.
-                             - A `PartitionSpec` to apply if the name matches.
-            tree: A dictionary of parameters, where keys are parameter names.
+        rules: A list of tuples, where each tuple contains:
+            - A regular expression to match parameter names.
+            - A `PartitionSpec` to apply if the name matches.
+        tree: A dictionary of parameters, where keys are parameter names
+            and values are the parameters (arrays) or indices.
+        min_size: Minimum size for applying sharding. Parameters smaller than
+            this will use PartitionSpec() for efficiency. Defaults to MIN_SHARDING_SIZE.
+        strict: If True, validates array shapes and applies min_size checks.
+            If False, applies rules without validation.
 
     Returns:
-            A dictionary with the same keys as `tree`, but values are replaced
-            with the corresponding `PartitionSpec` based on matching rules.
+        A dictionary with the same keys as `tree`, maintaining the original key order,
+        but with values replaced by the corresponding `PartitionSpec` based on
+        matching rules.
+
+    Raises:
+        ValueError: If no matching rule is found for a parameter.
+
+    Example:
+        >>> rules = [(".*weight", PartitionSpec("model", None))]
+        >>> tree = {"layer/weight": 0, "layer/bias": 1}
+        >>> match_partition_rules(rules, tree)
+        {"layer/weight": PartitionSpec("model", None), "layer/bias": PartitionSpec()}
     """
 
     min_size = min_size if min_size is not None else MIN_SHARDING_SIZE
@@ -487,32 +534,40 @@ def match_partition_rules(
     def get_partition_spec(name: str, leaf: jnp.ndarray) -> PartitionSpec:
         """
         Determine the partition spec for a parameter based on its name.
+
+        Matches the parameter name against rules in order and returns the first
+        matching PartitionSpec. Applies safety checks for array size and dimensions
+        when strict mode is enabled.
         """
+        if strict:
+            if not hasattr(leaf, "shape"):
+                return PartitionSpec()
+            size = np.prod(leaf.shape)
+            if len(leaf.shape) == 0:
+                """ Don't partition scalar values. """
+                return PartitionSpec()
 
-        if not hasattr(leaf, "shape"):
-            return PartitionSpec()
-        size = np.prod(leaf.shape)
-        if len(leaf.shape) == 0:
-            """ Don't partition scalar values. """
-            return PartitionSpec()
-
-        for rule, ps in rules:
-            if re.search(rule, name) is not None:
-                if size < min_size:
-                    if LOG_SHARDING_MOVE:
-                        warnings.warn(
-                            f"PartitionSpec Related to {name} was safer and faster being local array.",
-                            stacklevel=1,
-                        )
-                    return PartitionSpec()
-                if len(ps) > leaf.ndim:
-                    ps = PartitionSpec(*tuple(ps[: leaf.ndim]))
-                    if LOG_SHARDING_MOVE:
-                        warnings.warn(
-                            f"PartitionSpec Related to {name} went out of range (will be auto trimed to {ps}).",
-                            stacklevel=1,
-                        )
-                return ps
+            for rule, ps in rules:
+                if re.search(rule, name) is not None:
+                    if size < min_size:
+                        if LOG_SHARDING_MOVE:
+                            warnings.warn(
+                                f"PartitionSpec Related to {name} was safer and faster being local array.",
+                                stacklevel=1,
+                            )
+                        return PartitionSpec()
+                    if len(ps) > leaf.ndim:
+                        ps = PartitionSpec(*tuple(ps[: leaf.ndim]))
+                        if LOG_SHARDING_MOVE:
+                            warnings.warn(
+                                f"PartitionSpec Related to {name} went out of range (will be auto trimed to {ps}).",
+                                stacklevel=1,
+                            )
+                    return ps
+        else:
+            for rule, ps in rules:
+                if re.search(rule, name) is not None:
+                    return ps
         raise ValueError(f"Partition rule not found for param: {name}")
 
     return named_tree_map(get_partition_spec, tree, sep="/")

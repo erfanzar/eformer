@@ -16,7 +16,7 @@ import dataclasses
 
 import jax.numpy as jnp
 
-from ..dtypes.precision_types import DTYPE_MAPPING
+from ..dtypes.precision_types import DTYPE_MAPPING, get_platform_default_half
 
 
 @dataclasses.dataclass(frozen=True)
@@ -36,7 +36,11 @@ class Policy:
         if "=" in policy_str:
             for part in policy_str.split(","):
                 key, value = part.strip().split("=", 2)
-                dtype = DTYPE_MAPPING.get(value.strip().lower())
+                target = value.strip().lower()
+                if target == "half":
+                    dtype = get_platform_default_half()
+                else:
+                    dtype = DTYPE_MAPPING.get(target)
                 if dtype is None:
                     raise ValueError(f"Unknown dtype: {value}")
 
@@ -47,8 +51,11 @@ class Policy:
                 elif key in ("o", "output"):
                     output_dtype = dtype
         else:
-            # Single dtype for all
-            dtype = DTYPE_MAPPING.get(policy_str.strip().lower())
+            target = policy_str.strip().lower()
+            if target == "half":
+                dtype = get_platform_default_half()
+            else:
+                dtype = DTYPE_MAPPING.get(target)
             if dtype is None:
                 raise ValueError(f"Unknown dtype: {policy_str}")
             param_dtype = compute_dtype = output_dtype = dtype

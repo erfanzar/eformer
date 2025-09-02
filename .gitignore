@@ -8,6 +8,7 @@ env.py
 exp.py
 experimental.py
 # C extensions
+tmp-files
 *.so
 src/fjformer/pallas_operations/flash_attention.py
 # Distribution / packaging

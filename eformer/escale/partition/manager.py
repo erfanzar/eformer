@@ -267,6 +267,75 @@ class PartitionAxis(xTree):
                 if val == NOT_GIVEN:
                     raise ValueError(f"Partitioning rule `{fld.name}` was not resolved.")
 
+    def resolve_axis(
+        self,
+        axes: tp.Sequence[str | None],
+        mode: RUNTIME_MODE_TYPES,  # type:ignore
+    ) -> list[str | None]:
+        """
+        Generates a Axis from a sequence of semantic axis names and a mode.
+
+        Maps a sequence of semantic axis name strings (like BATCH, LENGTH) to the
+        actual mesh axis names defined in this `PartitionAxis` instance, considering
+        the current runtime mode (e.g., training vs. generation).
+
+        Args:
+            axes: A sequence of semantic axis name strings (e.g., [BATCH, LENGTH, HEAD])
+                or None (or "_") for axes that shouldn't be sharded.
+            mode: The current operational mode (e.g., MODE_TRAIN,
+                MODE_DECODE) which determines if generation-specific
+                rules should be applied.
+
+        Returns:
+            A instance representing the sharding for the given sequence of axes.
+
+        Raises:
+            ValueError: If an unknown semantic axis name is encountered or if
+                a resolved axis rule is still NOT_GIVEN (should be caught
+                by `_safety_check` but included for robustness).
+            LookupError: If an internal attribute name derived from the semantic
+                map isn't found in the instance (shouldn't happen with
+                correct class definition).
+        """
+        resolved_rules: list[AxisType] = []
+
+        for axis_name in axes:
+            if axis_name is None or axis_name == "_":
+                resolved_rules.append(None)
+                continue
+            if isinstance(axis_name, list):
+                standard_attr_name = [self._SEMANTIC_MAP.get(axis) or axis for axis in axis_name]
+
+            else:
+                standard_attr_name = self._SEMANTIC_MAP.get(axis_name)
+            if standard_attr_name is None:
+                raise ValueError(f"Unknown semantic axis name: '{axis_name}'")
+
+            target_attr_name = standard_attr_name
+            if mode in GENERATION_MODES:
+                gen_attr_name = self._STANDARD_TO_GENERATION_ATTR_MAP.get(standard_attr_name)
+                if gen_attr_name:
+                    if hasattr(self, gen_attr_name):
+                        gen_val = getattr(self, gen_attr_name)
+                        if gen_val is not None and gen_val is not NOT_GIVEN:
+                            target_attr_name = gen_attr_name
+
+            try:
+                if isinstance(target_attr_name, list):
+                    mesh_axis_rule = [getattr(self, attr_name) for attr_name in target_attr_name]
+                else:
+                    mesh_axis_rule: AxisType = getattr(self, target_attr_name)
+            except AttributeError as e:
+                raise LookupError(
+                    f"Internal error: Attribute '{target_attr_name}' not found in PartitionAxis instance."
+                ) from e
+
+            if mesh_axis_rule is NOT_GIVEN:
+                raise ValueError(f"Resolved axis rule for '{axis_name}' ('{target_attr_name}') is still NOT_GIVEN.")
+
+            resolved_rules.append(mesh_axis_rule)
+        return resolved_rules
+
     def resolve_spec(
         self,
         axes: tp.Sequence[str | None],
@@ -298,58 +367,7 @@ class PartitionAxis(xTree):
                 map isn't found in the instance (shouldn't happen with
                 correct class definition).
         """
-        resolved_rules: list[AxisType] = []
-
-        for axis_name in axes:
-            if axis_name is None or axis_name == "_":
-                # None or "_" explicitly means no sharding for this dimension
-                resolved_rules.append(None)
-                continue
-
-            # Look up the standard attribute name from the semantic map
-            if isinstance(axis_name, list):
-                # If the axis name is a list, we need to resolve each element
-                standard_attr_name = [self._SEMANTIC_MAP.get(axis) or axis for axis in axis_name]
-
-            else:
-                standard_attr_name = self._SEMANTIC_MAP.get(axis_name)
-            if standard_attr_name is None:
-                raise ValueError(f"Unknown semantic axis name: '{axis_name}'")
-
-            target_attr_name = standard_attr_name
-
-            # If in a generation mode, check for a specific generation rule
-            if mode in GENERATION_MODES:
-                gen_attr_name = self._STANDARD_TO_GENERATION_ATTR_MAP.get(standard_attr_name)
-                if gen_attr_name:
-                    # If a generation-specific attribute exists and is not None or NOT_GIVEN, use it
-                    if hasattr(self, gen_attr_name):
-                        gen_val = getattr(self, gen_attr_name)
-                        if gen_val is not None and gen_val is not NOT_GIVEN:
-                            target_attr_name = gen_attr_name
-
-            try:
-                # Get the mesh axis rule (string or tuple of strings) from the instance
-                if isinstance(target_attr_name, list):
-                    # If the target attribute name is a list, resolve each element
-                    mesh_axis_rule = [getattr(self, attr_name) for attr_name in target_attr_name]
-                else:
-                    mesh_axis_rule: AxisType = getattr(self, target_attr_name)
-            except AttributeError as e:
-                # This indicates a mismatch between _SEMANTIC_MAP/_STANDARD_TO_GENERATION_ATTR_MAP
-                # and the actual class attributes.
-                raise LookupError(
-                    f"Internal error: Attribute '{target_attr_name}' not found in PartitionAxis instance."
-                ) from e
-
-            if mesh_axis_rule is NOT_GIVEN:
-                # This should ideally be caught by _safety_check, but included here too
-                raise ValueError(f"Resolved axis rule for '{axis_name}' ('{target_attr_name}') is still NOT_GIVEN.")
-
-            resolved_rules.append(mesh_axis_rule)
-
-        # Create and return the PartitionSpec tuple
-        return PartitionSpec(*resolved_rules)
+        return PartitionSpec(*self.resolve_axis(axes=axes, mode=mode))
 
     __hash__ = hash_fn
 
@@ -435,7 +453,7 @@ class PartitionManager(PyTree):
         mode: RUNTIME_MODE_TYPES | int = NOT_GIVEN,  # type:ignore
         dynamic_axes: DynamicShardingAxes | None = NOT_GIVEN,
         shape: tp.Sequence[int] = NOT_GIVEN,
-    ) -> jax.Array:
+    ) -> PartitionSpec:
         if isinstance(axes, type) and issubclass(axes, tuple) and hasattr(axes, "_fields"):
             dynamic_axes = axes
             axes = NOT_GIVEN

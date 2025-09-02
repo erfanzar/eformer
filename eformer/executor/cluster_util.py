@@ -13,6 +13,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Cluster utilities for distributed execution with Ray and JAX.
+
+This module provides utilities for managing distributed clusters, particularly
+focused on SLURM environments and Ray cluster initialization. It handles
+automatic discovery of cluster topology, coordinator selection, and proper
+resource allocation across distributed nodes.
+
+Note:
+    This implementation is adapted from the Levanter project
+    (https://github.com/stanford-crfm/levanter/blob/main/src/levanter/distributed.py)
+    with modifications for the eFormer/EasyDeL framework.
+"""
+
 import atexit
 import itertools
 import logging
@@ -35,12 +49,35 @@ _VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
 _NODE_NAME = "SLURMD_NODENAME"
 
 
-class eRayExecutorSlurmCluster(clusters.SlurmCluster):
+class eSlurmCluster(clusters.SlurmCluster):
+    """Extended SLURM cluster implementation for Ray executor.
+
+    This class extends JAX's SlurmCluster to provide additional functionality
+    for Ray-based distributed execution in SLURM environments. It handles
+    automatic coordinator address discovery, device ID assignment, and
+    local process counting.
+
+    Attributes:
+        Inherits all attributes from jax.clusters.SlurmCluster.
+    """
+
     @classmethod
     def get_coordinator_address(cls) -> str:
+        """Get the coordinator address for the SLURM cluster.
+
+        Automatically determines the coordinator node and port based on
+        SLURM environment variables. The coordinator is typically the
+        first node in the node list.
+
+        Returns:
+            str: The coordinator address in the format "hostname:port".
+
+        Raises:
+            ValueError: If node list cannot be found in environment variables.
+        """
         _id = os.environ[_JOBID_PARAM]
         port = _choose_port(_id)
-        node_list = eRayExecutorSlurmCluster._node_list()
+        node_list = eSlurmCluster._node_list()
         if node_list is None:
             raise ValueError(
                 "Could not find node list in environment variables. You must set coordinator_address manually."
@@ -58,10 +95,31 @@ class eRayExecutorSlurmCluster(clusters.SlurmCluster):
 
     @classmethod
     def _node_list(cls):
+        """Get the SLURM node list from environment variables.
+
+        Searches through multiple possible SLURM environment variables
+        to find the node list.
+
+        Returns:
+            str | None: The node list string if found, None otherwise.
+        """
         return next((os.environ[o] for o in _NODE_LIST_CHOICES if o in os.environ), None)
 
     @classmethod
     def get_local_device_ids_for_process(cls) -> list[int] | None:
+        """Get the device IDs assigned to the current local process.
+
+        Determines which CUDA devices should be used by this process based
+        on the SLURM task configuration and CUDA_VISIBLE_DEVICES.
+
+        Returns:
+            list[int] | None: List of device IDs for this process, or None
+                if device assignment cannot be determined.
+
+        Raises:
+            ValueError: If the number of visible devices is not evenly
+                divisible by the number of local tasks.
+        """
         local_process_id = cls.get_local_process_id()
 
         if local_process_id is None:
@@ -88,7 +146,18 @@ class eRayExecutorSlurmCluster(clusters.SlurmCluster):
 
     @classmethod
     def _infer_local_process_count(cls):
-        node_list = eRayExecutorSlurmCluster._node_list()
+        """Infer the number of processes on the local node.
+
+        Parses SLURM environment variables to determine how many tasks
+        are running on the current node.
+
+        Returns:
+            int: The number of local processes/tasks.
+
+        Raises:
+            ValueError: If node list cannot be found in environment variables.
+        """
+        node_list = eSlurmCluster._node_list()
         if node_list is None:
             raise ValueError(
                 "Could not find node list in environment variables. You must set coordinator_address manually."
@@ -111,6 +180,21 @@ class eRayExecutorSlurmCluster(clusters.SlurmCluster):
 
 
 def _square_brace_expand(node_list):
+    """Expand SLURM node list notation with square brackets.
+
+    Expands compressed SLURM node list notation (e.g., "node[01-03,05]")
+    into a full list of node names.
+
+    Args:
+        node_list (str): Compressed node list string.
+
+    Returns:
+        list[str]: Expanded list of individual node names.
+
+    Example:
+        >>> _square_brace_expand("node[01-03,05]")
+        ['node01', 'node02', 'node03', 'node05']
+    """
     parts = re.findall(r"(\[.*?\]|[^\[\]]+)", node_list)
 
     def generate_numbers(number_string):
@@ -136,7 +220,13 @@ def _square_brace_expand(node_list):
 
 
 def logical_cpu_core_count():
-    """Returns the number of logical CPU cores available to the process."""
+    """Get the number of logical CPU cores available to the process.
+
+    First checks SLURM environment variables, then falls back to OS CPU count.
+
+    Returns:
+        int: Number of logical CPU cores available.
+    """
     num_cpus = os.getenv("SLURM_CPUS_ON_NODE", None)
     if num_cpus is not None:
         return int(num_cpus)
@@ -148,6 +238,11 @@ def logical_cpu_core_count():
 
 
 def _remove_if_possible(path):
+    """Remove a file if possible, ignoring errors.
+
+    Args:
+        path (str): Path to the file to remove.
+    """
     try:
         os.remove(path)
     except OSError:
@@ -155,18 +250,41 @@ def _remove_if_possible(path):
 
 
 def _touch(file_path):
+    """Create or update the timestamp of a file.
+
+    Args:
+        file_path (str): Path to the file to touch.
+    """
     with open(file_path, "a"):
         os.utime(file_path, None)
 
 
 def _choose_port(_id):
+    """Choose a port number based on a job ID.
+
+    Generates a deterministic port number in the range 53248-65535
+    based on the provided ID.
+
+    Args:
+        _id (str | int): Job or process ID.
+
+    Returns:
+        int: Port number.
+    """
     port = int(_id) % 2**12 + (65535 - 2**12 + 1)
     return port
 
 
 def _is_this_machine(host):
-    """
-    Checks if the given host identifies this machine.
+    """Check if the given host identifies this machine.
+
+    Determines whether a hostname or IP address refers to the current machine.
+
+    Args:
+        host (str): Hostname or IP address to check.
+
+    Returns:
+        bool: True if the host refers to this machine, False otherwise.
     """
     if host == "localhost" or host == "0.0.0.0":
         return True
@@ -179,6 +297,15 @@ def _is_this_machine(host):
 
 
 def _is_local_leader():
+    """Determine if this process is the local leader.
+
+    Uses file locking to elect a single leader process among all processes
+    running on the same node. The leader is responsible for starting the
+    Ray head node.
+
+    Returns:
+        bool: True if this process is the local leader, False otherwise.
+    """
     import atexit
 
     import filelock
@@ -218,6 +345,29 @@ def auto_ray_cluster(
     fail_if_cluster_already_initialized: bool = False,
     **kwargs,
 ):
+    """Automatically initialize a Ray cluster.
+
+    Handles automatic discovery and initialization of Ray clusters in various
+    environments. Can start both head and worker nodes as needed, with special
+    support for SLURM clusters.
+
+    Args:
+        address (str | None): Ray cluster address. If None, attempts auto-discovery
+            from RAY_ADDRESS environment variable or JAX coordinator.
+        namespace (str | None): Ray namespace to use. Defaults to "eray-executor".
+        start_workers (bool): Whether to start Ray workers on non-head nodes.
+            Defaults to True.
+        fail_if_cluster_already_initialized (bool): Whether to fail if a cluster
+            is already running. Defaults to False.
+        **kwargs: Additional arguments passed to ray.init().
+
+    Raises:
+        RuntimeError: If Ray head or worker fails to start.
+
+    Note:
+        This function can only be called once per process. Subsequent calls
+        will be ignored with a warning.
+    """
     global _already_initialized
 
     if _already_initialized:
@@ -304,12 +454,32 @@ def auto_ray_cluster(
 
 @dataclass(frozen=True)
 class DistributedConfig:
+    """Configuration for distributed JAX execution.
+
+    Encapsulates all settings needed to initialize JAX in a distributed
+    environment, with automatic detection of SLURM clusters.
+
+    Attributes:
+        coordinator_address (str | None): Address of the coordinator process.
+            Auto-detected from SLURM if None.
+        num_processes (int | None): Total number of processes in the cluster.
+        process_id (int | None): ID of this process (0-indexed).
+        local_device_ids (int | list[int] | None): Device IDs to use on this node.
+            Auto-detected from SLURM if None.
+    """
+
     coordinator_address: str | None = None
     num_processes: int | None = None
     process_id: int | None = None
     local_device_ids: int | list[int] | None = None
 
     def _is_distributed(self):
+        """Check if this is a distributed configuration.
+
+        Returns:
+            bool: True if any distributed settings are specified or a
+                cluster environment is detected.
+        """
         if (
             (self.coordinator_address is not None)
             or (self.num_processes is not None)
@@ -324,16 +494,25 @@ class DistributedConfig:
         return False
 
     def initialize(self):
+        """Initialize JAX distributed execution.
+
+        Sets up JAX for distributed execution based on the configuration,
+        with automatic detection of SLURM cluster settings if needed.
+
+        Note:
+            If no distributed configuration is provided and no cluster is
+            detected, JAX will run in single-process mode.
+        """
         if self._is_distributed():
             device_ids = self.local_device_ids
             coordinator_address = self.coordinator_address
 
-            if eRayExecutorSlurmCluster.is_env_present():
+            if eSlurmCluster.is_env_present():
                 if device_ids is None:
-                    device_ids = eRayExecutorSlurmCluster.get_local_device_ids_for_process()
+                    device_ids = eSlurmCluster.get_local_device_ids_for_process()
 
                 if coordinator_address is None:
-                    coordinator_address = eRayExecutorSlurmCluster.get_coordinator_address()
+                    coordinator_address = eSlurmCluster.get_coordinator_address()
 
             jax.distributed.initialize(
                 coordinator_address,
@@ -355,11 +534,28 @@ class DistributedConfig:
 
 
 @dataclass
-class RayConfig:
+class RayClusterConfig:
+    """Configuration for Ray cluster initialization.
+
+    Controls how Ray clusters are started and connected to.
+
+    Attributes:
+        address (str | None): Ray cluster address. If None, uses auto-discovery.
+        start_workers (bool): Whether to start Ray workers on non-head nodes.
+            Defaults to True.
+        auto_start_cluster (bool): Whether to automatically start the Ray cluster.
+            Defaults to True.
+    """
+
     address: str | None = None
     start_workers: bool = True
     auto_start_cluster: bool = True
 
     def initialize(self):
+        """Initialize the Ray cluster based on configuration.
+
+        Calls auto_ray_cluster() with the configured settings if
+        auto_start_cluster is True.
+        """
         if self.auto_start_cluster:
             auto_ray_cluster(address=self.address, start_workers=self.start_workers)

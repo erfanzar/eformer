@@ -1,7 +1,7 @@
-eformer.executor.tpu_patch_ray
+eformer.serialization.__init__
 ==============================
 
-.. automodule:: eformer.executor.tpu_patch_ray
+.. automodule:: eformer.serialization.__init__
     :members:
     :undoc-members:
     :show-inheritance:

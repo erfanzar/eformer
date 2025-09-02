@@ -12,7 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import ray
-from .cluster_util import DistributedConfig, RayClusterConfig, auto_ray_cluster, eSlurmCluster
+"""Serialization module for eFormer.
 
-__all__ = ("DistributedConfig", "RayClusterConfig", "auto_ray_cluster", "eSlurmCluster", "ray")
+This module provides efficient checkpoint saving and loading with support for:
+- TensorStore backend for large-scale storage
+- Async operations for parallel I/O
+- Sharding for distributed arrays
+- Google Cloud Storage support
+- SafeTensors format compatibility
+"""
+
+from .async_manager import AsyncCheckpointManager
+from .base_manager import CheckpointManager
+from .serialization import tree_deserialize_leaves, tree_serialize_leaves
+
+__all__ = (
+    "AsyncCheckpointManager",
+    "CheckpointManager",
+    "tree_deserialize_leaves",
+    "tree_serialize_leaves",
+)

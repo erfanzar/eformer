@@ -198,6 +198,81 @@ class Replicated(DynamicShardingAxes):
     mode: tp.ClassVar = MODE_TRAIN
 
 
+class ExpertColumnWise(DynamicShardingAxes):
+    """
+    Dynamic sharding specification for Column Wise sharding.
+
+    For a typical expert layer weight tensor of shape [num_experts, hidden_size, intermediate_size]:
+    - Dimension 0 (num_experts): Shard across EP (expert parallel)
+    - Dimension 1 (hidden_size): Shard across FSDP (parameter sharding)
+    - Dimension 2 (intermediate_size): Shard across TP (tensor parallel - column-wise)
+
+    DP is used for batch dimension in activations, SP for sequence length.
+    """
+
+    axes: tp.ClassVar = [EP, FSDP, TP]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class ExpertRowWise(DynamicShardingAxes):
+    """
+    Dynamic sharding specification for Row Wise sharding.
+
+    For a typical expert layer weight tensor of shape [num_experts, intermediate_size, hidden_size]:
+    - Dimension 0 (num_experts): Shard across EP (expert parallel)
+    - Dimension 1 (intermediate_size): Shard across TP (tensor parallel - row-wise)
+    - Dimension 2 (hidden_size): Shard across FSDP (parameter sharding)
+
+    DP is used for batch dimension in activations, SP for sequence length.
+    """
+
+    axes: tp.ClassVar = [EP, TP, FSDP]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class ExpertColumnWiseAlt(DynamicShardingAxes):
+    """
+    Alternative column-wise sharding using SP for sequence-related parameters.
+    Use this if your expert weights have a sequence-related dimension.
+    """
+
+    axes: tp.ClassVar = [EP, [FSDP, SP], TP]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class ExpertRowWiseAlt(DynamicShardingAxes):
+    """
+    Alternative row-wise sharding using SP for sequence-related parameters.
+    Use this if your expert weights have a sequence-related dimension.
+    """
+
+    axes: tp.ClassVar = [EP, TP, [FSDP, SP]]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class ExpertActivations(DynamicShardingAxes):
+    """
+    Sharding for expert activation tensors of shape [batch, sequence, num_experts, hidden].
+    - Batch dimension: DP (data parallel)
+    - Sequence dimension: SP (sequence parallel)
+    - Expert dimension: EP (expert parallel)
+    - Hidden dimension: TP (tensor parallel) or FSDP
+    """
+
+    axes: tp.ClassVar = [DP, SP, EP, TP]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class ExpertActivationsAlt(DynamicShardingAxes):
+    """
+    Alternative activation sharding for shape [batch, sequence, hidden].
+    When experts are already selected/routed.
+    """
+
+    axes: tp.ClassVar = [DP, SP, [TP, FSDP]]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 """Default value used for masking, typically in attention mechanisms."""
 NOT_GIVEN = _Empty()

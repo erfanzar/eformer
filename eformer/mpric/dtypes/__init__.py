@@ -11,6 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .precision_types import DTYPE_MAPPING, HAS_FLOAT8
+from .precision_types import DTYPE_MAPPING, DTYPE_TO_STRING_MAP, STRING_TO_DTYPE_MAP, put_dtype
 
-__all__ = ("DTYPE_MAPPING", "HAS_FLOAT8")
+__all__ = ("DTYPE_MAPPING", "DTYPE_TO_STRING_MAP", "STRING_TO_DTYPE_MAP", "put_dtype")

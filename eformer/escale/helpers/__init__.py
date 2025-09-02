@@ -19,6 +19,7 @@ from .base import (
     ShapeBasedShardingRule,
     ShardingAnalyzer,
     ShardingRule,
+    barrier_sync,
 )
 
 __all__ = (
@@ -28,4 +29,5 @@ __all__ = (
     "ShapeBasedShardingRule",
     "ShardingAnalyzer",
     "ShardingRule",
+    "barrier_sync",
 )

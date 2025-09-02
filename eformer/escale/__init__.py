@@ -19,10 +19,14 @@ from .helpers import (
     ShapeBasedShardingRule,
     ShardingAnalyzer,
     ShardingRule,
+    barrier_sync,
 )
 from .mesh import (
     MeshPartitionHelper,
+    cpu_context,
+    create_cpu_mesh,
     create_mesh,
+    force_cpu,
     parse_mesh_from_string,
 )
 from .partition import (
@@ -70,11 +74,15 @@ __all__ = (
     "auto_namedsharding",
     "auto_partition_spec",
     "auto_shard_array",
+    "barrier_sync",
     "convert_sharding_strategy",
+    "cpu_context",
+    "create_cpu_mesh",
     "create_mesh",
     "create_pattern_based_partition_spec",
     "extract_sharding_structure",
     "extract_shardings",
+    "force_cpu",
     "get_axes_size_in_mesh",
     "get_corrected_named_sharding",
     "get_incontext_mesh",

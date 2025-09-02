@@ -12,6 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Resource management system for Ray-based distributed computing.
+
+This module provides comprehensive resource management capabilities for Ray execution,
+including hardware accelerator configurations (CPU, GPU, TPU), resource allocation,
+and runtime environment management. It serves as the foundation for distributed
+training and inference workloads in the eFormer framework.
+
+Key Components:
+    - RayResources: Core resource specification and management
+    - HardwareType: Constants for various accelerator types
+    - Accelerator Configs: CPU, GPU, and TPU configuration classes
+    - Protocols: Interfaces for compute resource configurations
+
+Example:
+    Basic GPU configuration:
+        >>> config = GpuAcceleratorConfig(
+        ...     device_count=2,
+        ...     gpu_model=HardwareType.NVIDIA_A100,
+        ...     cpu_count=4
+        ... )
+        >>> remote_fn = config.create_remote_decorator()(my_function)
+        >>> result = ray.get(remote_fn.remote())
+
+    TPU configuration:
+        >>> config = TpuAcceleratorConfig(
+        ...     tpu_version=HardwareType.GOOGLE_TPU_V4,
+        ...     pod_count=1
+        ... )
+        >>> resources = config.to_ray_resources()
+"""
+
 import functools
 import logging
 import multiprocessing
@@ -36,87 +67,162 @@ logger = logging.getLogger("ray")
 
 @dataclass
 class RayResources:
-    """
-    A representation of resource requirements for Ray tasks and actors.
+    """A representation of resource requirements for Ray tasks and actors.
 
     This dataclass encapsulates all resource specifications needed when creating
     Ray tasks or actors, allowing for easy conversion between different resource
-    representation formats used by Ray.
+    representation formats used by Ray. It provides methods for converting between
+    Ray's internal resource representation and user-friendly specifications.
+
+    Attributes:
+        num_cpus: Number of CPU cores to allocate for the task/actor.
+        num_gpus: Number of GPU devices to allocate for the task/actor.
+        resources: Custom resource requirements as name-value pairs.
+        runtime_env: Ray runtime environment configuration for dependencies.
+        accelerator_type: Specific accelerator type identifier (e.g., "A100").
+
+    Example:
+        >>> resources = RayResources(
+        ...     num_cpus=4,
+        ...     num_gpus=2,
+        ...     accelerator_type="A100"
+        ... )
+        >>> kwargs = resources.to_kwargs()
+        >>> @ray.remote(**kwargs)
+        ... def my_task():
+        ...     return "Hello from Ray!"
     """
 
-    cpu_allocation: int = 1
-    gpu_allocation: int = 0
-    custom_resources: dict[str, float] = field(default_factory=dict)
-    execution_env: RuntimeEnv = field(default_factory=RuntimeEnv)
-    hardware_type: str | None = None
+    num_cpus: int = 1
+    num_gpus: int = 0
+    resources: dict[str, float] = field(default_factory=dict)
+    runtime_env: RuntimeEnv = field(default_factory=RuntimeEnv)
+    accelerator_type: str | None = None
 
     def to_kwargs(self) -> dict[str, Any]:
-        """
-        Convert resource specifications to kwargs for ray.remote() decorator.
+        """Convert resource specifications to kwargs for ray.remote() decorator.
+
+        This method transforms the resource specifications into a format directly
+        compatible with Ray's remote decorator, handling all the necessary parameter
+        mapping and filtering.
 
         Returns:
-            Dictionary of keyword arguments compatible with ray.remote().
+            dict[str, Any]: Dictionary of keyword arguments compatible with ray.remote().
+                Includes num_cpus, num_gpus, resources, runtime_env, and optionally
+                accelerator_type if specified.
+
+        Example:
+            >>> resources = RayResources(num_cpus=2, num_gpus=1)
+            >>> kwargs = resources.to_kwargs()
+            >>> print(kwargs)
+            {'num_cpus': 2, 'num_gpus': 1, 'resources': {}, 'runtime_env': {}}
         """
         remote_kwargs = {
-            "num_cpus": self.cpu_allocation,
-            "num_gpus": self.gpu_allocation,
-            "resources": self.custom_resources,
-            "runtime_env": self.execution_env,
+            "num_cpus": self.num_cpus,
+            "num_gpus": self.num_gpus,
+            "resources": self.resources,
+            "runtime_env": self.runtime_env,
         }
 
-        if self.hardware_type is not None:
-            remote_kwargs["accelerator_type"] = self.hardware_type
+        if self.accelerator_type is not None:
+            remote_kwargs["accelerator_type"] = self.accelerator_type
 
         return remote_kwargs
 
     def to_resource_dict(self) -> dict[str, float]:
-        """
-        Converts resource specifications to a dictionary format for resource reporting.
+        """Convert resource specifications to a dictionary format for resource reporting.
 
-        Note: This is primarily for resource visualization and reporting, not for
-        direct use with ray.remote(). For ray.remote(), use to_kwargs() instead.
+        This method creates a flattened view of all resource requirements, suitable
+        for monitoring, logging, and resource visualization tools. It standardizes
+        resource names and handles accelerator type encoding.
+
+        Note:
+            This is primarily for resource visualization and reporting, not for
+            direct use with ray.remote(). For ray.remote(), use to_kwargs() instead.
 
         Returns:
-            Dictionary mapping resource names to quantities.
-        """
-        resource_dict = {"CPU": self.cpu_allocation, "GPU": self.gpu_allocation}
-        resource_dict.update(self.custom_resources)
+            dict[str, float]: Dictionary mapping resource names to quantities.
+                Standard keys include "CPU", "GPU", and any custom resources.
+                Accelerator types are encoded as "accelerator_type:<type>".
 
-        if self.hardware_type is not None:
-            resource_dict[f"accelerator_type:{self.hardware_type}"] = 0.001
+        Example:
+            >>> resources = RayResources(num_cpus=4, num_gpus=2, accelerator_type="A100")
+            >>> resource_dict = resources.to_resource_dict()
+            >>> print(resource_dict)
+            {'CPU': 4, 'GPU': 2, 'accelerator_type:A100': 0.001}
+        """
+        resource_dict = {"CPU": self.num_cpus, "GPU": self.num_gpus}
+        resource_dict.update(self.resources)
+
+        if self.accelerator_type is not None:
+            resource_dict[f"accelerator_type:{self.accelerator_type}"] = 0.001
 
         return resource_dict
 
     @staticmethod
     def from_resource_dict(resource_spec: dict[str, float]) -> "RayResources":
-        """
-        Create a RayResources instance from a resource dictionary.
+        """Create a RayResources instance from a resource dictionary.
+
+        This factory method reconstructs a RayResources object from a flattened
+        resource specification dictionary, handling the reverse transformation
+        of to_resource_dict().
 
         Args:
-            resource_spec: Dictionary mapping resource names to quantities.
+            resource_spec (dict[str, float]): Dictionary mapping resource names to quantities.
+                Expected keys include "CPU", "GPU", custom resources, and optionally
+                "accelerator_type:<type>" for accelerator specifications.
 
         Returns:
-            A new RayResources instance representing the specified resources.
+            RayResources: A new RayResources instance representing the specified resources.
+
+        Example:
+            >>> resource_dict = {'CPU': 4, 'GPU': 2, 'accelerator_type:A100': 0.001}
+            >>> resources = RayResources.from_resource_dict(resource_dict)
+            >>> print(f"CPUs: {resources.num_cpus}, GPUs: {resources.num_gpus}")
+            CPUs: 4, GPUs: 2
         """
+        resources = dict(resource_spec)  # Make a copy
+        num_cpus = resources.pop("CPU", 0)
+        num_gpus = resources.pop("GPU", 0)
 
-        cpu_count = resource_spec.pop("CPU", 0)
-        gpu_count = resource_spec.pop("GPU", 0)
-
-        hardware_type = None
-        accelerator_keys = [k for k in resource_spec.keys() if k.startswith("accelerator_type:")]
+        accelerator_type = None
+        accelerator_keys = [k for k in resources.keys() if k.startswith("accelerator_type:")]
         if accelerator_keys:
-            hardware_type = accelerator_keys[0].split(":", 1)[1]
+            accelerator_type = accelerator_keys[0].split(":", 1)[1]
             for key in accelerator_keys:
-                resource_spec.pop(key)
+                resources.pop(key)
 
         return RayResources(
-            cpu_allocation=cpu_count,
-            gpu_allocation=gpu_count,
-            custom_resources=resource_spec,
-            hardware_type=hardware_type,
+            num_cpus=int(num_cpus),
+            num_gpus=int(num_gpus),
+            resources=resources,
+            accelerator_type=accelerator_type,
         )
 
+    @staticmethod
     def forkify_remote_fn(remote_fn: RemoteFunction | Callable):
+        """Wrap a remote function to execute in a separate process.
+
+        This method transforms a Ray remote function or callable to execute in
+        an isolated subprocess, providing additional process isolation and
+        error handling capabilities. Useful for functions that may cause
+        memory leaks or require process-level isolation.
+
+        Args:
+            remote_fn (RemoteFunction | Callable): The remote function or callable
+                to be wrapped with process isolation.
+
+        Returns:
+            RemoteFunction | functools.partial: The wrapped function that will
+                execute in a separate process.
+
+        Example:
+            >>> @ray.remote
+            ... def my_function(x):
+            ...     return x * 2
+            >>> forked_fn = RayResources.forkify_remote_fn(my_function)
+            >>> result = ray.get(forked_fn.remote(5))
+        """
         if isinstance(remote_fn, RemoteFunction):
             fn = remote_fn._function
 
@@ -136,6 +242,31 @@ class RayResources:
 
     @staticmethod
     def separate_process_fn(underlying_function, args, kwargs):
+        """Execute a function in a separate subprocess with error handling.
+
+        This method runs the specified function in an isolated subprocess,
+        capturing results or exceptions and handling process lifecycle management.
+        It provides robust error handling and timeout protection.
+
+        Args:
+            underlying_function (Callable): The function to execute in subprocess.
+            args (tuple): Positional arguments to pass to the function.
+            kwargs (dict): Keyword arguments to pass to the function.
+
+        Returns:
+            Any: The return value from the function execution.
+
+        Raises:
+            RuntimeError: If the subprocess times out.
+            ValueError: If the subprocess execution fails with an exception.
+
+        Example:
+            >>> def add(x, y):
+            ...     return x + y
+            >>> result = RayResources.separate_process_fn(add, (2, 3), {})
+            >>> print(result)  # 5
+        """
+
         def target_fn(queue, args, kwargs):
             try:
                 result = underlying_function(*args, **kwargs)
@@ -168,11 +299,56 @@ class RayResources:
         runtime_env: dict[str, str] | dict[str, dict[str, str]],
         **extra_env,
     ):
+        """Merge runtime environment configurations for a remote function.
+
+        This method combines multiple sources of runtime environment configuration,
+        including the function's existing environment, provided runtime_env, and
+        additional environment variables. Uses deep merging to handle nested
+        configurations properly.
+
+        Args:
+            remote_fn (RemoteFunction | tp.Callable): The remote function whose
+                runtime environment will be updated.
+            runtime_env (dict[str, str] | dict[str, dict[str, str]]): Runtime
+                environment configuration to merge.
+            **extra_env: Additional environment variables as keyword arguments.
+
+        Returns:
+            dict: Merged runtime environment configuration.
+
+        Example:
+            >>> @ray.remote
+            ... def my_fn():
+            ...     return os.getenv('MY_VAR')
+            >>> new_env = RayResources.update_fn_resource_env(
+            ...     my_fn,
+            ...     {'env_vars': {'MY_VAR': 'value1'}},
+            ...     MY_OTHER_VAR='value2'
+            ... )
+        """
         sources = [e for e in [remote_fn._runtime_env, runtime_env, extra_env] if e is not None]
         return mergedeep.merge({}, *sources, strategy=mergedeep.Strategy.ADDITIVE)
 
     @staticmethod
     def cancel_all_futures(futures):
+        """Cancel all Ray futures in the provided collection.
+
+        This utility method attempts to cancel all Ray futures/ObjectRefs in the
+        given iterable, providing error handling for individual cancellation failures.
+        Useful for cleanup operations when a batch of tasks needs to be terminated.
+
+        Args:
+            futures (Iterable[ray.ObjectRef]): Collection of Ray futures to cancel.
+
+        Note:
+            Individual cancellation failures are logged but do not stop the
+            cancellation of remaining futures.
+
+        Example:
+            >>> futures = [my_remote_fn.remote(i) for i in range(10)]
+            >>> # If something goes wrong, cancel all pending tasks
+            >>> RayResources.cancel_all_futures(futures)
+        """
         for future in futures:
             try:
                 ray.cancel(future)
@@ -181,11 +357,34 @@ class RayResources:
 
 
 class HardwareType:
-    """
-    Constants representing known accelerator and hardware types that can be requested.
+    """Constants representing known accelerator and hardware types.
 
-    These constants provide standardized identifiers for common hardware accelerators
-    to ensure consistent naming across the application.
+    This class provides standardized identifiers for various hardware accelerators
+    and compute devices that can be requested in Ray resource configurations.
+    The constants ensure consistent naming across the application and provide
+    a centralized reference for supported hardware types.
+
+    The identifiers correspond to actual hardware accelerator names and models
+    that may be available in cloud platforms, data centers, or local systems.
+    They are used in resource configurations to specify hardware requirements
+    for compute-intensive tasks.
+
+    Categories:
+        - NVIDIA GPUs: Tesla series, A-series, H-series (V100, A100, H100, etc.)
+        - Intel: GPU Max series and Gaudi accelerators
+        - AMD: Instinct series and Radeon GPUs
+        - Google TPUs: Various TPU versions (V2, V3, V4, V5, V6)
+        - AWS: Neuron cores for machine learning
+        - Huawei: NPU accelerators (Ascend series)
+
+    Example:
+        >>> config = GpuAcceleratorConfig(
+        ...     gpu_model=HardwareType.NVIDIA_A100,
+        ...     device_count=2
+        ... )
+        >>> tpu_config = TpuAcceleratorConfig(
+        ...     tpu_version=HardwareType.GOOGLE_TPU_V4
+        ... )
     """
 
     NVIDIA_TESLA_V100 = "V100"
@@ -224,11 +423,21 @@ class HardwareType:
 
 
 def available_cpu_cores() -> int:
-    """
-    Determine the number of logical CPU cores available on the current system.
+    """Determine the number of logical CPU cores available on the current system.
+
+    This function checks for SLURM environment variables first (common in HPC
+    clusters), then falls back to the system's reported CPU count. It provides
+    a reliable way to determine available compute capacity across different
+    deployment environments.
 
     Returns:
-        Integer count of available logical CPU cores.
+        int: Number of available logical CPU cores. Returns 1 as fallback
+            if the system doesn't support CPU count detection.
+
+    Example:
+        >>> cores = available_cpu_cores()
+        >>> print(f"Available CPU cores: {cores}")
+        Available CPU cores: 8
     """
     num_cpus = os.getenv("SLURM_CPUS_ON_NODE", None)
     if num_cpus is not None:
@@ -241,12 +450,32 @@ def available_cpu_cores() -> int:
 
 
 class ComputeResourceConfig(Protocol):
-    """
-    A protocol defining the interface for hardware resource configurations.
+    """Protocol defining the interface for hardware resource configurations.
 
-    This protocol establishes a contract for all resource configuration classes,
-    ensuring they provide the necessary methods for Ray task and actor deployment.
-    The implementations are primarily used for training and inference workloads.
+    This protocol establishes a standardized contract that all resource configuration
+    classes must implement. It ensures consistency across different accelerator types
+    (CPU, GPU, TPU) and provides the necessary methods for Ray task and actor
+    deployment. The implementations are primarily used for distributed training
+    and inference workloads.
+
+    The protocol defines both required attributes and methods that enable:
+    - Resource specification conversion to Ray formats
+    - Runtime environment management
+    - Hardware-specific configuration handling
+    - Remote function decoration with appropriate resources
+
+    Attributes:
+        execution_env (RuntimeEnv): Ray runtime environment configuration.
+        head_name (str | None): Optional identifier for the head node.
+        head_workers (int): Number of workers on the head node.
+
+    Example:
+        >>> def deploy_model(config: ComputeResourceConfig):
+        ...     remote_options = config.get_remote_options()
+        ...     @ray.remote(**remote_options)
+        ...     class ModelServer:
+        ...         def predict(self, data): pass
+        ...     return ModelServer
     """
 
     execution_env: RuntimeEnv
@@ -254,38 +483,82 @@ class ComputeResourceConfig(Protocol):
     head_workers: int = 1
 
     def hardware_identifier(self) -> str | None:
-        """
-        Get the identifier for the hardware accelerator being used.
+        """Get the identifier for the hardware accelerator being used.
+
+        This method returns a string identifier that specifies the exact hardware
+        accelerator type or model required for the computation. The identifier
+        typically corresponds to values from the HardwareType class.
 
         Returns:
-            String identifier for the hardware accelerator or None if no accelerator is used.
+            str | None: String identifier for the hardware accelerator (e.g., "A100",
+                "TPU-V4") or None if no specific accelerator is required.
+
+        Example:
+            >>> config = GpuAcceleratorConfig(gpu_model="A100")
+            >>> print(config.hardware_identifier())  # "A100"
         """
         return None
 
     def get_remote_options(self) -> dict[str, Any]:
-        """
-        Get keyword arguments for ray.remote() based on this resource configuration.
+        """Get keyword arguments for ray.remote() based on this resource configuration.
+
+        This method converts the resource configuration into a dictionary format
+        that can be directly passed to Ray's remote decorator. It handles the
+        translation between high-level resource specifications and Ray's internal
+        resource format.
 
         Returns:
-            Dictionary of arguments suitable for passing to ray.remote().
+            dict[str, Any]: Dictionary of arguments suitable for passing to ray.remote().
+                Common keys include num_cpus, num_gpus, resources, runtime_env,
+                and accelerator_type.
+
+        Example:
+            >>> config = GpuAcceleratorConfig(device_count=2, cpu_count=4)
+            >>> options = config.get_remote_options()
+            >>> @ray.remote(**options)
+            ... def gpu_task():
+            ...     return "Task complete"
         """
         return self.to_ray_resources().to_kwargs()
 
     def to_ray_resources(self) -> RayResources:
-        """
-        Convert this configuration to a RayResources object.
+        """Convert this configuration to a RayResources object.
+
+        This method transforms the configuration into a RayResources instance,
+        which provides a standardized representation of resource requirements
+        that can be used across different parts of the system.
 
         Returns:
-            RayResources instance representing the hardware resources.
+            RayResources: RayResources instance representing the hardware resources.
+                Contains all necessary information for Ray task/actor deployment.
+
+        Example:
+            >>> config = CpuAcceleratorConfig(core_count=4)
+            >>> resources = config.to_ray_resources()
+            >>> print(resources.num_cpus)  # 4
         """
         ...
 
     def create_remote_decorator(self) -> Callable[[Any], Any]:
-        """
-        Create a ray.remote decorator with this resource configuration.
+        """Create a ray.remote decorator with this resource configuration.
+
+        This convenience method creates a pre-configured Ray remote decorator
+        that includes all the resource specifications from this configuration.
+        The decorator can then be applied to functions or classes to make them
+        Ray remote operations.
 
         Returns:
-            A ray.remote decorator that can be applied to functions or classes.
+            Callable[[Any], Any]: A ray.remote decorator that can be applied to
+                functions or classes. The decorator includes all resource requirements
+                from this configuration.
+
+        Example:
+            >>> config = GpuAcceleratorConfig(device_count=1)
+            >>> remote_decorator = config.create_remote_decorator()
+            >>> @remote_decorator
+            ... def train_model():
+            ...     return "Training complete"
+            >>> result = ray.get(train_model.remote())
         """
         return ray.remote(**self.get_remote_options())
 
@@ -295,18 +568,29 @@ class ComputeResourceConfig(Protocol):
         /,
         **kwargs,
     ) -> "ComputeResourceConfig":
-        """
-        Create a new resource configuration with additional environment variables.
+        """Create a new resource configuration with additional environment variables.
 
         This method allows for adding or overriding environment variables without
-        modifying other aspects of the resource configuration.
+        modifying other aspects of the resource configuration. It creates a new
+        configuration instance with updated environment variables, preserving
+        immutability of the original configuration.
 
         Args:
-            env_vars: Dictionary of environment variables to add or override
-            **kwargs: Additional environment variables as keyword arguments
+            env_vars (dict[str, str] | None): Dictionary of environment variables
+                to add or override. If None, only kwargs are used.
+            **kwargs: Additional environment variables as keyword arguments.
+                These are merged with env_vars if provided.
 
         Returns:
-            A new ComputeResourceConfig with the combined environment variables.
+            ComputeResourceConfig: A new ComputeResourceConfig instance with the
+                combined environment variables from existing config, env_vars, and kwargs.
+
+        Example:
+            >>> config = CpuAcceleratorConfig()
+            >>> new_config = config.with_environment_variables(
+            ...     {'CUDA_VISIBLE_DEVICES': '0,1'},
+            ...     OMP_NUM_THREADS='4'
+            ... )
         """
         current_env_vars = self.execution_env.get("env_vars", {})
         new_env_vars = {**current_env_vars, **(env_vars or {}), **kwargs}
@@ -316,11 +600,30 @@ class ComputeResourceConfig(Protocol):
 
 @dataclass(frozen=True)
 class CpuAcceleratorConfig(ComputeResourceConfig):
-    """
-    Resource configuration for CPU-only workloads.
+    """Resource configuration for CPU-only workloads.
 
-    This configuration is suitable for local development, batch processing,
-    or any tasks that don't require hardware acceleration.
+    This configuration is designed for computational tasks that rely solely on
+    CPU processing power. It's suitable for local development, batch processing,
+    data preprocessing, or any tasks that don't require specialized hardware
+    acceleration like GPUs or TPUs.
+
+    The configuration automatically detects available CPU cores and provides
+    sensible defaults for CPU-bound workloads. It can be used for distributed
+    CPU computing across multiple nodes in a Ray cluster.
+
+    Attributes:
+        core_count (int): Number of CPU cores to allocate. Defaults to all available cores.
+        execution_env (RuntimeEnv): Ray runtime environment for dependencies and setup.
+        resource_name (str): Name identifier for the resource type (default: "GPU").
+        runtime_name (str): Unique runtime identifier for this configuration.
+        worker_count (int): Number of worker processes to spawn.
+
+    Example:
+        >>> config = CpuAcceleratorConfig(core_count=4, worker_count=2)
+        >>> @config.create_remote_decorator()
+        ... def cpu_intensive_task(data):
+        ...     return process_data_on_cpu(data)
+        >>> result = ray.get(cpu_intensive_task.remote(my_data))
     """
 
     core_count: int = field(default_factory=available_cpu_cores)
@@ -330,44 +633,97 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
     worker_count: int = 1
 
     def hardware_identifier(self) -> str | None:
-        """
-        Get the hardware identifier (none for CPU-only configuration).
+        """Get the hardware identifier (none for CPU-only configuration).
+
+        For CPU-only configurations, there is no specialized hardware accelerator,
+        so this method always returns None to indicate that any available CPU
+        resources can be used.
 
         Returns:
-            None since no specialized hardware accelerator is used.
+            None: Always None since no specialized hardware accelerator is used.
+
+        Example:
+            >>> config = CpuAcceleratorConfig()
+            >>> print(config.hardware_identifier())  # None
         """
         return None
 
     def get_remote_options(self) -> dict[str, Any]:
-        """
-        Get Ray remote options for CPU-only execution.
+        """Get Ray remote options for CPU-only execution.
+
+        This method returns the Ray remote options specifically configured for
+        CPU-only tasks, including the CPU core count and runtime environment.
+        GPU allocation is explicitly set to 0.
 
         Returns:
-            Dictionary of options for ray.remote().
+            dict[str, Any]: Dictionary of options for ray.remote() containing:
+                - num_cpus: Number of CPU cores to allocate
+                - runtime_env: Runtime environment configuration
+
+        Example:
+            >>> config = CpuAcceleratorConfig(core_count=2)
+            >>> options = config.get_remote_options()
+            >>> print(options)
+            {'num_cpus': 2, 'runtime_env': {}}
         """
         return {"num_cpus": self.core_count, "runtime_env": self.execution_env}
 
     def to_ray_resources(self) -> RayResources:
-        """
-        Convert to Ray resource specifications.
+        """Convert to Ray resource specifications for CPU-only allocation.
+
+        This method creates a RayResources object that represents CPU-only
+        resource allocation with no GPU or specialized accelerator requirements.
 
         Returns:
-            RayResources object representing CPU-only allocation.
+            RayResources: RayResources object representing CPU-only allocation
+                with the specified core count, zero GPUs, and runtime environment.
+
+        Example:
+            >>> config = CpuAcceleratorConfig(core_count=8)
+            >>> resources = config.to_ray_resources()
+            >>> print(f"CPUs: {resources.num_cpus}, GPUs: {resources.num_gpus}")
+            CPUs: 8, GPUs: 0
         """
         return RayResources(
-            cpu_allocation=self.core_count,
-            gpu_allocation=0,
-            execution_env=self.execution_env,
+            num_cpus=self.core_count,
+            num_gpus=0,
+            runtime_env=self.execution_env,
         )
 
 
 @dataclass(frozen=True)
 class GpuAcceleratorConfig(ComputeResourceConfig):
-    """
-    Resource configuration for GPU-accelerated workloads.
+    """Resource configuration for GPU-accelerated workloads.
 
     This configuration specifies GPU requirements for computationally intensive
-    tasks such as neural network training and inference.
+    tasks such as neural network training, inference, and other parallel computing
+    workloads that benefit from GPU acceleration. It supports both generic GPU
+    allocation and specific GPU model requirements.
+
+    The configuration automatically detects available GPU resources on the current
+    node and provides flexible options for multi-GPU setups. It's designed to work
+    with NVIDIA GPUs through Ray's GPU resource management system.
+
+    Attributes:
+        device_count (int): Number of GPU devices to allocate per task/actor.
+        execution_env (RuntimeEnv): Ray runtime environment for CUDA/GPU dependencies.
+        gpu_model (str | None): Specific GPU model identifier (e.g., "A100", "V100").
+        cpu_count (int): Number of CPU cores to allocate alongside GPUs.
+        chips_per_host (int): Number of GPU devices available per host node.
+        runtime_name (str): Unique runtime identifier for this configuration.
+        worker_count (int): Number of worker processes to spawn.
+        resource_name (str): Name identifier for the resource type.
+
+    Example:
+        >>> config = GpuAcceleratorConfig(
+        ...     device_count=2,
+        ...     gpu_model=HardwareType.NVIDIA_A100,
+        ...     cpu_count=8
+        ... )
+        >>> @config.create_remote_decorator()
+        ... def train_model(data):
+        ...     return gpu_training_function(data)
+        >>> result = ray.get(train_model.remote(training_data))
     """
 
     device_count: int = 1
@@ -380,20 +736,43 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
     resource_name: str = field(default="GPU")
 
     def hardware_identifier(self) -> str | None:
-        """
-        Get the hardware identifier for the GPU model.
+        """Get the hardware identifier for the GPU model.
+
+        This method returns the specific GPU model identifier if one was specified
+        during configuration. This is used by Ray's accelerator management system
+        to ensure tasks are scheduled on nodes with the required GPU hardware.
 
         Returns:
-            String identifier for the GPU model or None if any GPU is acceptable.
+            str | None: String identifier for the GPU model (e.g., "A100", "V100")
+                or None if any available GPU is acceptable.
+
+        Example:
+            >>> config = GpuAcceleratorConfig(gpu_model="A100")
+            >>> print(config.hardware_identifier())  # "A100"
+            >>> generic_config = GpuAcceleratorConfig()
+            >>> print(generic_config.hardware_identifier())  # None
         """
         return self.gpu_model
 
     def get_remote_options(self) -> dict[str, Any]:
-        """
-        Get Ray remote options for GPU accelerated execution.
+        """Get Ray remote options for GPU-accelerated execution.
+
+        This method constructs the Ray remote options dictionary for GPU-accelerated
+        tasks, including CPU and GPU allocation, runtime environment, and optionally
+        specific accelerator type requirements.
 
         Returns:
-            Dictionary of options for ray.remote().
+            dict[str, Any]: Dictionary of options for ray.remote() containing:
+                - num_cpus: Number of CPU cores to allocate
+                - num_gpus: Number of GPU devices to allocate
+                - runtime_env: Runtime environment configuration
+                - accelerator_type: Specific GPU model (if specified)
+
+        Example:
+            >>> config = GpuAcceleratorConfig(device_count=1, cpu_count=4, gpu_model="A100")
+            >>> options = config.get_remote_options()
+            >>> print(options)
+            {'num_cpus': 4, 'num_gpus': 1, 'runtime_env': {}, 'accelerator_type': 'A100'}
         """
         remote_options = {
             "num_cpus": self.cpu_count,
@@ -407,28 +786,63 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
         return remote_options
 
     def to_ray_resources(self) -> RayResources:
-        """
-        Convert to Ray resource specifications.
+        """Convert to Ray resource specifications for GPU allocation.
+
+        This method creates a RayResources object that represents GPU resource
+        allocation with the specified number of GPUs, CPUs, accelerator type,
+        and runtime environment configuration.
 
         Returns:
-            RayResources object representing GPU resource allocation.
+            RayResources: RayResources object representing GPU resource allocation
+                with specified device count, CPU count, and optional accelerator type.
+
+        Example:
+            >>> config = GpuAcceleratorConfig(device_count=2, cpu_count=8)
+            >>> resources = config.to_ray_resources()
+            >>> print(f"CPUs: {resources.num_cpus}, GPUs: {resources.num_gpus}")
+            CPUs: 8, GPUs: 2
         """
         return RayResources(
-            cpu_allocation=self.cpu_count,
-            gpu_allocation=self.device_count,
-            hardware_type=self.gpu_model,
-            execution_env=self.execution_env,
+            num_cpus=self.cpu_count,
+            num_gpus=self.device_count,
+            accelerator_type=self.gpu_model,
+            runtime_env=self.execution_env,
         )
 
 
 @dataclass(frozen=True)
 class TpuAcceleratorConfig(ComputeResourceConfig):
-    """
-    Resource configuration for TPU-accelerated workloads.
+    """Resource configuration for TPU-accelerated workloads.
 
-    This configuration is suitable for large-scale machine learning tasks using
-    Google's Tensor Processing Units (TPUs), particularly for transformer models
-    and other matrix-heavy computation.
+    This configuration is designed for large-scale machine learning tasks using
+    Google's Tensor Processing Units (TPUs). TPUs are particularly well-suited
+    for transformer models, large neural networks, and other matrix-heavy
+    computations that benefit from TPU's specialized architecture.
+
+    The configuration handles TPU pod management, resource allocation, and
+    integration with Ray's distributed computing framework. It supports various
+    TPU versions and pod configurations for different computational requirements.
+
+    Attributes:
+        tpu_version (str): TPU version identifier (e.g., "TPU-V4", "TPU-V5P").
+        pod_count (int): Number of TPU pods to allocate for the task.
+        execution_env (RuntimeEnv): Ray runtime environment for TPU dependencies.
+        cpu_count (int): Number of CPU cores to allocate alongside TPUs.
+        chips_per_host (int): Number of TPU chips available per host.
+        worker_count (int): Number of worker processes for distributed TPU training.
+        runtime_name (str): TPU pod name identifier.
+        resource_name (str): Resource type identifier for TPU resources.
+
+    Example:
+        >>> config = TpuAcceleratorConfig(
+        ...     tpu_version=HardwareType.GOOGLE_TPU_V4,
+        ...     pod_count=1,
+        ...     cpu_count=4
+        ... )
+        >>> @config.create_remote_decorator()
+        ... def train_transformer(model_config):
+        ...     return tpu_training_loop(model_config)
+        >>> result = ray.get(train_transformer.remote(config))
     """
 
     tpu_version: str
@@ -441,20 +855,40 @@ class TpuAcceleratorConfig(ComputeResourceConfig):
     resource_name: str = field(default="TPU")
 
     def hardware_identifier(self) -> str:
-        """
-        Get the hardware identifier for the TPU configuration.
+        """Get the hardware identifier for the TPU configuration.
+
+        This method returns the TPU version identifier that specifies the exact
+        TPU hardware generation and capabilities required for the computation.
+        This ensures tasks are scheduled on appropriate TPU resources.
 
         Returns:
-            String identifier for the TPU version and size.
+            str: String identifier for the TPU version (e.g., "TPU-V4", "TPU-V5P").
+                This corresponds to the tpu_version attribute.
+
+        Example:
+            >>> config = TpuAcceleratorConfig(tpu_version="TPU-V4")
+            >>> print(config.hardware_identifier())  # "TPU-V4"
         """
         return self.tpu_version
 
     def get_remote_options(self) -> dict[str, Any]:
-        """
-        Get Ray remote options for TPU-accelerated execution.
+        """Get Ray remote options for TPU-accelerated execution.
+
+        This method constructs the Ray remote options dictionary for TPU-accelerated
+        tasks. TPU resources are specified using Ray's custom resource system,
+        with the TPU version as the resource name and pod count as the quantity.
 
         Returns:
-            Dictionary of options for ray.remote().
+            dict[str, Any]: Dictionary of options for ray.remote() containing:
+                - num_cpus: Number of CPU cores to allocate
+                - resources: Custom resource specification for TPU (version: count)
+                - runtime_env: Runtime environment configuration
+
+        Example:
+            >>> config = TpuAcceleratorConfig(tpu_version="TPU-V4", pod_count=1, cpu_count=2)
+            >>> options = config.get_remote_options()
+            >>> print(options)
+            {'num_cpus': 2, 'resources': {'TPU-V4': 1}, 'runtime_env': {}}
         """
         return {
             "num_cpus": self.cpu_count,
@@ -463,16 +897,27 @@ class TpuAcceleratorConfig(ComputeResourceConfig):
         }
 
     def to_ray_resources(self) -> RayResources:
-        """
-        Convert to Ray resource specifications for TPU resources.
+        """Convert to Ray resource specifications for TPU resources.
+
+        This method creates a RayResources object that represents TPU resource
+        allocation using Ray's custom resource system. TPU resources are specified
+        as custom resources with the TPU version as the key.
 
         Returns:
-            RayResources object representing TPU resource allocation.
+            RayResources: RayResources object representing TPU resource allocation
+                with specified CPU count, TPU version and pod count as custom resources,
+                and runtime environment.
+
+        Example:
+            >>> config = TpuAcceleratorConfig(tpu_version="TPU-V4", pod_count=2)
+            >>> resources = config.to_ray_resources()
+            >>> print(resources.resources)
+            {'TPU-V4': 2.0}
         """
         return RayResources(
-            cpu_allocation=self.cpu_count,
-            custom_resources={self.tpu_version: float(self.pod_count)},
-            execution_env=self.execution_env,
+            num_cpus=self.cpu_count,
+            resources={self.tpu_version: float(self.pod_count)},
+            runtime_env=self.execution_env,
         )
 
     def redecorate_remote_fn_for_call(
@@ -480,6 +925,33 @@ class TpuAcceleratorConfig(ComputeResourceConfig):
         remote_fn: RemoteFunction | tp.Callable,
         **extra_envs,
     ):
+        """Redecorate a remote function with TPU-specific resource requirements.
+
+        This method applies TPU-specific configuration to a remote function,
+        including process isolation (forkification), TPU pod resource allocation,
+        and runtime environment updates. It's specifically designed for TPU
+        workloads that require special handling.
+
+        Args:
+            remote_fn (RemoteFunction | tp.Callable): The remote function or callable
+                to be configured for TPU execution.
+            **extra_envs: Additional environment variables to merge into the
+                runtime environment.
+
+        Returns:
+            RemoteFunction: A reconfigured remote function with TPU resource
+                requirements and updated runtime environment.
+
+        Example:
+            >>> config = TpuAcceleratorConfig(tpu_version="TPU-V4")
+            >>> def my_tpu_function():
+            ...     return "TPU computation"
+            >>> tpu_fn = config.redecorate_remote_fn_for_call(
+            ...     my_tpu_function,
+            ...     JAX_PLATFORMS='tpu'
+            ... )
+            >>> result = ray.get(tpu_fn.remote())
+        """
         remote_fn = RayResources.forkify_remote_fn(remote_fn)
         if not isinstance(remote_fn, RemoteFunction):
             remote_fn = ray.remote(remote_fn)
