@@ -155,7 +155,7 @@ def get_names_from_partition_spec(
     return list(names)
 
 
-def with_sharding_constraint(arr: jnp.ndarray | tp.Any, sharding: PartitionSpec | NamedSharding) -> jnp.ndarray | tp.Any:
+def array_with_sharding_constraint(arr: jnp.ndarray | tp.Any, sharding: PartitionSpec | NamedSharding) -> jnp.ndarray | tp.Any:
     """
     Apply sharding constraints with automatic correction based on array shape and mesh.
 
