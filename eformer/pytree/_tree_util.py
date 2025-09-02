@@ -744,7 +744,7 @@ def int_key_to_string(xs):
     flatten = False
     if not is_flatten(xs):
         flatten = True
-        xs = flatten_dict(xs)
+        xs = flatten_dict(xs, keep_empty_nodes=True)
     for key in list(xs.keys()):
         if not isinstance(key, str):
             xs[tuple([str(k) for k in key])] = xs.pop(key)
