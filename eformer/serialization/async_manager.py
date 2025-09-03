@@ -13,29 +13,33 @@
 # limitations under the License.
 
 
+import base64
 import hashlib
 import json
 import os
-import threading
+import pickle
 import typing as tp
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.distributed import is_initialized
+from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from safetensors import flax as safe_flax
 from tqdm.autonotebook import tqdm
 
-from eformer.escale import create_cpu_mesh
+from eformer.escale import create_cpu_mesh, match_partition_rules
 from eformer.loggings import get_logger
 from eformer.paths import ePath, ePathLike
 from eformer.pytree import PyTree, flatten_dict, is_flatten, serialization, unflatten_dict
+from eformer.serialization.serialization import leaf_key_paths
 
 from .base_manager import CheckpointManager
 from .serialization import tree_deserialize_leaves, tree_serialize_leaves
@@ -44,7 +48,81 @@ from .utils import derive_base_prefix_from_path, index_filename
 from .utils import read_process_array as _read_process_array
 from .utils import to_host as _to_host
 
-logger = get_logger(__name__)
+logger = get_logger("AsyncCheckpointManager")
+
+
+def _is_array_like(x):
+    """Check if an object is array-like (has shape and dtype attributes).
+
+    Args:
+        x: Object to check.
+
+    Returns:
+        bool: True if object has both shape and dtype attributes.
+    """
+    return hasattr(x, "shape") and hasattr(x, "dtype")
+
+
+def _treedef_to_b64(treedef) -> str:
+    """Serialize a JAX tree definition to base64 string.
+
+    Args:
+        treedef: JAX tree structure definition.
+
+    Returns:
+        str: Base64 encoded string representation of the tree definition.
+    """
+    return base64.b64encode(pickle.dumps(treedef)).decode("utf-8")
+
+
+def _treedef_from_b64(s: str):
+    """Deserialize a JAX tree definition from base64 string.
+
+    Args:
+        s: Base64 encoded string containing tree definition.
+
+    Returns:
+        Deserialized JAX tree structure definition.
+    """
+    return pickle.loads(base64.b64decode(s.encode("utf-8")))
+
+
+def _structure_path(path: ePathLike | str, prefix: str | None) -> ePath:  # type: ignore
+    """Generate the structure metadata file path for a checkpoint.
+
+    Args:
+        path: Base directory path for the checkpoint.
+        prefix: Optional prefix for the structure file name.
+
+    Returns:
+        ePath: Full path to the structure JSON file.
+    """
+    name = f"{prefix or 'pytree'}_structure.json"
+    return ePath(path) / name
+
+
+def _is_array_like(x):
+    """Check if an object is array-like (has shape and dtype attributes).
+
+    Args:
+        x: Object to check.
+
+    Returns:
+        bool: True if object has both shape and dtype attributes.
+    """
+    return hasattr(x, "shape") and hasattr(x, "dtype")
+
+
+def _is_none(x):
+    """Check if a value is None.
+
+    Args:
+        x: Value to check.
+
+    Returns:
+        bool: True if x is None, False otherwise.
+    """
+    return x is None
 
 
 @dataclass
@@ -154,7 +232,6 @@ class AsyncCheckpointManager:
         enable_validation: bool = False,
         enable_compression: bool = False,
         use_tensorstore: bool = True,
-        max_workers: int = 8,
     ):
         if jax.process_count() > 1:
             assert is_initialized(), "you should call jax distribution init before running process."
@@ -166,11 +243,8 @@ class AsyncCheckpointManager:
         self.enable_validation = enable_validation
         self.enable_compression = enable_compression
         self.use_tensorstore = use_tensorstore
-        self.max_workers = max_workers
 
         self.gcs_client = None
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self._save_lock = threading.Lock()
 
         if gcs_bucket:
             self.gcs_client = CheckpointManager.create_gcs_client(gcs_credentials_path)
@@ -181,8 +255,6 @@ class AsyncCheckpointManager:
         Ensures the thread pool executor is properly shutdown when the
         manager is destroyed.
         """
-        if hasattr(self, "executor"):
-            self.executor.shutdown(wait=False)
 
     @staticmethod
     def _estimate_nbytes(array: jax.Array) -> int:
@@ -469,11 +541,7 @@ class AsyncCheckpointManager:
             separately.
         """
 
-        from eformer.pytree import unflatten_dict
-
         pytree = unflatten_dict(tree, sep=".")
-
-        from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
 
         manager = GlobalAsyncCheckpointManager()
 
@@ -512,7 +580,6 @@ class AsyncCheckpointManager:
         Returns:
             Tuple of (loaded tree dictionary, metadata dictionary).
         """
-        from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
 
         manager = GlobalAsyncCheckpointManager()
 
@@ -612,8 +679,6 @@ class AsyncCheckpointManager:
                     prefix=prefix,
                 )
             else:
-                from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
-
                 manager = GlobalAsyncCheckpointManager()
                 tree = tree_deserialize_leaves(
                     checkpoint_dir=path_str,
@@ -746,8 +811,6 @@ class AsyncCheckpointManager:
             if isinstance(shardings, dict) and not any(isinstance(v, dict) for v in shardings.values()):
                 shard_fns = shardings
             else:
-                from eformer.pytree import flatten_dict, is_flatten
-
                 if not is_flatten(shardings):
                     shard_fns = flatten_dict(shardings, sep=".")
                 else:
@@ -828,13 +891,255 @@ class AsyncCheckpointManager:
 
     @staticmethod
     def is_tensorstore(path) -> bool:
+        """Check if a checkpoint path uses TensorStore format.
+
+        Args:
+            path: Path to check for TensorStore format.
+
+        Returns:
+            bool: True if the path contains or points to a TensorStore checkpoint.
+        """
         if str(path).endswith("tensorstore_index.json"):
             return True
         return (ePath(path) / "tensorstore_index.json").exists()
 
     @staticmethod
     def safe_loadpath(path) -> ePathLike:
+        """Convert a checkpoint path to a safe loadable format.
+
+        Strips TensorStore index filename if present to get the base directory.
+
+        Args:
+            path: Checkpoint path that may include index filename.
+
+        Returns:
+            ePathLike: Cleaned path suitable for loading.
+        """
         if AsyncCheckpointManager.is_tensorstore:
             if str(path).endswith("tensorstore_index.json"):
                 return ePath(str(path)[: -len("tensorstore_index.json")])
         return ePath(path)
+
+    def save_pytree(
+        self,
+        pytree: PyTree,
+        path: ePathLike | str,
+        mesh: Mesh | None = None,
+        *,
+        prefix: str,
+        do_all_gather: bool = False,
+        cpu_offload: bool = True,
+        dtype: jnp.dtype | None = None,
+        extras: dict | None = None,
+        write_index: bool = True,
+    ) -> str:
+        """Save a PyTree with exact structure and prefix.
+
+        Saves a PyTree structure to disk with support for both TensorStore and SafeTensors
+        backends. Arrays are saved to <path>/<prefix>/..., while index and structure
+        metadata go to <path>/.
+
+        Args:
+            pytree: PyTree structure to save.
+            path: Directory path where the checkpoint will be saved.
+            mesh: JAX mesh for distributed computation.
+            prefix: Required prefix for organizing the saved tree (e.g., 'model', 'optimizer').
+            do_all_gather: Whether to gather all arrays to host before saving.
+            cpu_offload: Whether to offload arrays to CPU during gathering to prevent OOM.
+            dtype: Optional data type to cast arrays to before saving.
+            extras: Additional metadata to save with the checkpoint.
+            write_index: Whether to write the index file (for TensorStore backend).
+
+        Returns:
+            str: Path where the checkpoint was saved.
+
+        Raises:
+            ValueError: If prefix is empty or not a string.
+            FileNotFoundError: If TensorStore index creation fails.
+        """
+        if not prefix or not isinstance(prefix, str):
+            raise ValueError("A non-empty string prefix is required")
+
+        root = ePath(path)
+        root.mkdir(parents=True, exist_ok=True)
+
+        if do_all_gather:
+            use_dtype = dtype or self.float_dtype
+            pytree = jax.tree_util.tree_map(
+                lambda x: (_is_array_like(x) and _to_host(x, use_dtype, mesh, cpu_offload)) or x,
+                pytree,
+                is_leaf=lambda x: isinstance(x, jax.Array | np.generic | float | int),
+            )
+
+        treedef = jax.tree_util.tree_structure(pytree)
+        leaves = jax.tree_util.tree_leaves(pytree, is_leaf=_is_none)
+
+        leaf_keys_tree = leaf_key_paths(pytree, prefix=prefix, is_leaf=_is_none)
+        leaf_keys_full: list[str] = jax.tree_util.tree_leaves(leaf_keys_tree, is_leaf=_is_none)
+
+        arr_mask = [_is_array_like(x) for x in leaves]
+        array_keys = [k for k, m in zip(leaf_keys_full, arr_mask, strict=False) if m]
+        nonarray_indices = [i for i, m in enumerate(arr_mask) if not m]
+        nonarray_payload = {str(i): base64.b64encode(pickle.dumps(leaves[i])).decode("utf-8") for i in nonarray_indices}
+
+        backend = "tensorstore" if self.use_tensorstore else "safetensors"
+        array_relpaths: list[str] = []
+        safetensors_file = None
+
+        manager = GlobalAsyncCheckpointManager()
+        tree_serialize_leaves(
+            checkpoint_dir=str(root),
+            pytree=pytree,
+            manager=manager,
+            prefix=prefix,
+            write_index=write_index,
+        )
+
+        index_path = root / "tensorstore_index.json"
+        if not index_path.exists():
+            raise FileNotFoundError(f"Missing tensorstore_index.json in {root}")
+        idx = json.loads(index_path.read_text())
+        arrays_info = idx.get("prefixes", {}).get(prefix, [])
+        if not arrays_info:
+            raise ValueError(f"No arrays recorded in index for prefix={prefix!r}")
+
+        relpaths_from_index = [info["path"] for info in arrays_info]
+        keys_from_index = [".".join(Path(rp).parts) for rp in relpaths_from_index]
+        if set(keys_from_index) != set(array_keys):
+            missing = set(array_keys) - set(keys_from_index)
+            extra = set(keys_from_index) - set(array_keys)
+            raise ValueError(
+                f"TensorStore index keys mismatch for prefix={prefix!r}. "
+                f"Missing: {sorted(missing)}; Extra: {sorted(extra)}"
+            )
+
+        key_to_rel = dict(zip(keys_from_index, relpaths_from_index, strict=False))
+        array_relpaths = [key_to_rel[k] for k in array_keys]
+
+        structure = {
+            "format": "pytree-structure",
+            "version": "1",
+            "backend": backend,
+            "prefix": prefix,
+            "treedef_b64": _treedef_to_b64(treedef),
+            "leaf_keys_full": leaf_keys_full,
+            "arr_mask": arr_mask,
+            "array_keys": array_keys,
+            "array_relpaths": array_relpaths,
+            "nonarray_payload": nonarray_payload,
+            "safetensors_file": str(safetensors_file) if safetensors_file else None,
+            "extras": extras or {},
+        }
+        _structure_path(root, prefix).write_text(json.dumps(structure, indent=2))
+
+        meta = CheckpointMetadata(timestamp=datetime.now().isoformat(), custom_metadata=extras)
+        (root / "checkpoint_metadata.json").write_text(json.dumps(meta.to_dict(), indent=2))
+
+        return str(root)
+
+    def load_pytree(
+        self,
+        path: ePathLike | str,
+        mesh: Mesh,
+        *,
+        prefix: str,
+        shardings: dict[str, tp.Callable] | None = None,
+        partition_rules: tp.Sequence[tuple[str, PartitionSpec]] | None = None,
+        dtype: jnp.dtype | None = None,
+    ) -> tuple[PyTree, dict]:
+        """Load a PyTree saved by save_pytree with the same prefix.
+
+        Loads a PyTree structure from disk that was previously saved with save_pytree.
+        Supports both TensorStore and SafeTensors backends with automatic detection.
+
+        Args:
+            path: Directory path containing the saved checkpoint.
+            mesh: JAX mesh for distributed computation and array sharding.
+            prefix: Required prefix that must match the one used during save.
+            shardings: Optional dictionary mapping array keys to sharding functions.
+            partition_rules: Optional sequence of (regex, PartitionSpec) tuples for
+                pattern-based array sharding.
+            dtype: Optional data type to cast arrays to after loading.
+
+        Returns:
+            Tuple of (loaded PyTree, metadata dictionary).
+
+        Raises:
+            ValueError: If prefix is empty, doesn't match saved prefix, or data is corrupted.
+            FileNotFoundError: If structure file or arrays are missing.
+        """
+        if not prefix or not isinstance(prefix, str):
+            raise ValueError("A non-empty string prefix is required")
+
+        root = ePath(path)
+        struct_path = _structure_path(root, prefix)
+        if not struct_path.exists():
+            raise FileNotFoundError(f"Missing pytree_structure.json in {root}")
+
+        struct = json.loads(struct_path.read_text())
+        if struct.get("prefix") != prefix:
+            raise ValueError(
+                f"Structure recorded for prefix={struct.get('prefix')!r}, "
+                f"but you requested prefix={prefix!r}. Use the same prefix you saved with."
+            )
+
+        treedef = _treedef_from_b64(struct["treedef_b64"])
+        leaf_keys_full: list[str] = struct["leaf_keys_full"]
+        arr_mask: list[bool] = struct["arr_mask"]
+        array_keys: list[str] = struct["array_keys"]
+        metadata = struct.get("extras", {})
+
+        def default_sharding():
+            return NamedSharding(mesh=mesh, spec=PartitionSpec())
+
+        relpaths: list[str] = struct["array_relpaths"]
+        if len(relpaths) != len(array_keys):
+            raise ValueError("array_relpaths and array_keys length mismatch")
+
+        abs_paths = [str(root / rp) for rp in relpaths]
+
+        missing = [p for p in abs_paths if not (ePath(p) / ".zarray").exists()]
+        if missing:
+            idx = root / "tensorstore_index.json"
+            prefixes = []
+            if idx.exists():
+                idx_data = json.loads(idx.read_text())
+                prefixes = sorted(list(idx_data.get("prefixes", {}).keys()))
+            raise FileNotFoundError(
+                f"{len(missing)} arrays missing (example: {missing[0]}). "
+                f"Check that the prefix you pass matches the one saved. "
+                f"Available prefixes in this directory: {prefixes}"
+            )
+
+        if partition_rules is not None:
+            matched = match_partition_rules(
+                partition_rules,
+                {k.replace(".", "/"): i for i, k in enumerate(array_keys)},
+                strict=False,
+            )
+            apply_shardings = [NamedSharding(mesh=mesh, spec=matched[k.replace(".", "/")]) for k in array_keys]
+        else:
+            apply_shardings = [
+                shardings.get(k, default_sharding()) if shardings else default_sharding() for k in array_keys
+            ]
+
+        manager = GlobalAsyncCheckpointManager()
+        array_leaves = manager.deserialize_with_paths(shardings=apply_shardings, paths=abs_paths)
+
+        if dtype is not None:
+            array_leaves = [jnp.asarray(x, dtype=dtype) for x in array_leaves]
+
+        leaves_full = [None] * len(leaf_keys_full)
+        it = iter(array_leaves)
+        nonarray_payload: dict[str, str] = struct.get("nonarray_payload", {})
+        for i, is_arr in enumerate(arr_mask):
+            if is_arr:
+                leaves_full[i] = next(it)
+            else:
+                payload_b64 = nonarray_payload.get(str(i))
+                if payload_b64 is None:
+                    raise ValueError(f"Missing non-array payload for leaf index {i}")
+                leaves_full[i] = pickle.loads(base64.b64decode(payload_b64))
+
+        pytree = jax.tree_util.tree_unflatten(treedef, leaves_full)
+        return pytree, metadata
