@@ -514,13 +514,14 @@ class GCSPath(UniversalPath):
                     rel_name = f"{rel_name}/{part}" if rel_name else part
                     relative_names.add(rel_name)
                     if len(parts) > 0:
-                        relative_names.add(f"{rel_name}/")
+                        relative_names.add(rel_name + "/")
             for relative_name in relative_names:
                 if fnmatch.fnmatch(relative_name, pattern):
                     yield GCSPath(f"gs://{self.bucket_name}/{prefix}{relative_name}", self.client)
         else:
             pattern = pattern.replace("**", "*") if not recursive else pattern
-            sub_patterns = pattern.split("/")
+            has_trailing_delimited = pattern.endswith("/")
+            sub_patterns = pattern.rstrip("/").split("/")
             paths_cache: dict[str, list[GCSPath]] = {}
             stack = [(prefix, sub_patterns)]
             while len(stack) > 0:
@@ -531,7 +532,6 @@ class GCSPath(UniversalPath):
                 remaining_patterns = patterns[1:]
 
                 if current_prefix not in paths_cache:
-                    print("Fetching paths for prefix:", current_prefix)
                     paths_cache[current_prefix] = list(GCSPath(f"gs://{self.bucket_name}/{current_prefix}", self.client).iterdir())
                 paths = paths_cache[current_prefix]
 
@@ -539,7 +539,7 @@ class GCSPath(UniversalPath):
                     blob_name = path.blob_name
                     relative_name = blob_name[len(current_prefix) :]
                     if fnmatch.fnmatch(relative_name, current_pattern):
-                        if len(remaining_patterns) == 0:
+                        if len(remaining_patterns) == 0 and (not has_trailing_delimited or path.is_dir()):
                             yield path
                         elif blob_name.endswith("/") and len(remaining_patterns) > 0:
                             stack.append((blob_name, remaining_patterns))
