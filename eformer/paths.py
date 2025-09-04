@@ -147,7 +147,7 @@ class UniversalPath(ABC):
         pass
 
     @abstractmethod
-    def glob(self, pattern: str) -> Iterator["UniversalPath"]:
+    def glob(self, pattern: str, recursive: bool = False) -> Iterator["UniversalPath"]:
         pass
 
     @abstractmethod
@@ -293,7 +293,8 @@ class LocalPath(UniversalPath):
             for item in self.path.iterdir():
                 yield LocalPath(item)
 
-    def glob(self, pattern: str) -> Iterator["LocalPath"]:
+    def glob(self, pattern: str, recursive: bool = False) -> Iterator["LocalPath"]:
+        pattern = pattern.replace("**", "*") if not recursive else pattern
         for item in self.path.glob(pattern):
             yield LocalPath(item)
 
@@ -488,24 +489,60 @@ class GCSPath(UniversalPath):
             prefix = self.blob_name if self.blob_name.endswith("/") else self.blob_name + "/"
             delimiter = "/"
 
-        for blob in self.bucket.list_blobs(prefix=prefix, delimiter=delimiter):
-            if blob.name != prefix:
-                yield GCSPath(f"gs://{self.bucket_name}/{blob.name}", self.client)
+        for page in self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter=delimiter).pages:
+            for blob in page:
+                if blob.name != prefix:
+                    yield GCSPath(f"gs://{self.bucket_name}/{blob.name}", self.client)
+            for prfx in page.prefixes:
+                yield GCSPath(f"gs://{self.bucket_name}/{prfx}", self.client)
 
-        for prfx in self.bucket.list_blobs(prefix=prefix, delimiter=delimiter).prefixes:
-            yield GCSPath(f"gs://{self.bucket_name}/{prfx}", self.client)
-
-    def glob(self, pattern: str) -> Iterator["GCSPath"]:
+    def glob(self, pattern: str, recursive: bool = False) -> Iterator["GCSPath"]:
         import fnmatch
 
         prefix = self.blob_name if self.blob_name.endswith("/") else self.blob_name + "/"
         if not self.blob_name:
             prefix = ""
 
-        for blob in self.bucket.list_blobs(prefix=prefix):
-            relative_name = blob.name[len(prefix) :]
-            if fnmatch.fnmatch(relative_name, pattern):
-                yield GCSPath(f"gs://{self.bucket_name}/{blob.name}", self.client)
+        if recursive:
+            relative_names = set()
+            for blob in self.bucket.list_blobs(prefix=prefix):
+                relative_name = blob.name[len(prefix) :]
+                rel_name = ""
+                parts = relative_name.split("/")
+                while len(parts) > 0:
+                    part = parts.pop(0)
+                    rel_name = f"{rel_name}/{part}" if rel_name else part
+                    relative_names.add(rel_name)
+                    if len(parts) > 0:
+                        relative_names.add(f"{rel_name}/")
+            for relative_name in relative_names:
+                if fnmatch.fnmatch(relative_name, pattern):
+                    yield GCSPath(f"gs://{self.bucket_name}/{prefix}{relative_name}", self.client)
+        else:
+            pattern = pattern.replace("**", "*") if not recursive else pattern
+            sub_patterns = pattern.split("/")
+            paths_cache: dict[str, list[GCSPath]] = {}
+            stack = [(prefix, sub_patterns)]
+            while len(stack) > 0:
+                current_prefix, patterns = stack.pop()
+                if len(patterns) == 0:
+                    continue
+                current_pattern = patterns[0]
+                remaining_patterns = patterns[1:]
+
+                if current_prefix not in paths_cache:
+                    print("Fetching paths for prefix:", current_prefix)
+                    paths_cache[current_prefix] = list(GCSPath(f"gs://{self.bucket_name}/{current_prefix}", self.client).iterdir())
+                paths = paths_cache[current_prefix]
+
+                for path in paths:
+                    blob_name = path.blob_name
+                    relative_name = blob_name[len(current_prefix) :]
+                    if fnmatch.fnmatch(relative_name, current_pattern):
+                        if len(remaining_patterns) == 0:
+                            yield path
+                        elif blob_name.endswith("/") and len(remaining_patterns) > 0:
+                            stack.append((blob_name, remaining_patterns))
 
     def __truediv__(self, other) -> "GCSPath":
         other = str(other)
