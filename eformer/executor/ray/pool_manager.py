@@ -43,14 +43,14 @@ Example:
 
     >>> from eformer.executor.ray import SlicePoolManager
     >>>
-    >>> # Create manager with automatic placement group coordination
+    >>>
     >>> manager = SlicePoolManager(tpu_type="v4-8")
     >>> manager.scale_multislice(num_slices=4)
     >>> actors = manager.get_all_actors_in_pool()
     >>>
-    >>> # Placement groups are automatically managed
+    >>>
     >>> manager.prepare_all_slices()
-    >>> manager.drain_actor_pool()  # Cleans up placement groups
+    >>> manager.drain_actor_pool()
 """
 
 from __future__ import annotations

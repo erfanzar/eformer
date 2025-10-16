@@ -243,7 +243,7 @@ class AsyncCheckpointManager:
         self.use_tensorstore = use_tensorstore
 
         self.gcs_client = None
-        self._global_manager = None  # Lazy initialization
+        self._global_manager = None
 
         if gcs_bucket:
             self.gcs_client = CheckpointManager.create_gcs_client(gcs_credentials_path)

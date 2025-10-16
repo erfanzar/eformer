@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Type definitions and error handling utilities for Ray-based distributed execution.
 
 This module provides a comprehensive type system and error handling framework for
@@ -32,9 +33,9 @@ Example:
     Basic job status tracking:
 
     >>> job_info = JobInfo(name="training_job", state="running", kind="training")
-    >>> # On success:
+    >>>
     >>> status = JobSucceeded(job_info, result={"loss": 0.1})
-    >>> # On failure:
+    >>>
     >>> status = JobFailed(job_info, error=ValueError("Invalid input"))
 
     Exception serialization:
@@ -43,8 +44,8 @@ Example:
     ...     risky_operation()
     ... except Exception:
     ...     exc_info = ExceptionInfo.ser_exc_info()
-    ...     # Later, in another process:
-    ...     exc_info.reraise()  # Re-raises the original exception
+    ...
+    ...     exc_info.reraise()
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ def handle_ray_error(job_info: JobInfo, e: RayError) -> JobStatus:
         ...     status = handle_ray_error(job_info, e)
         ...     assert isinstance(status, JobPreempted)
     """
-    if isinstance(e, (NodeDiedError, OwnerDiedError, ActorDiedError, ActorUnavailableError, WorkerCrashedError)):
+    if isinstance(e, NodeDiedError | OwnerDiedError | ActorDiedError | ActorUnavailableError | WorkerCrashedError):
         logger.exception("Infra/preemption-related error", exc_info=e)
         return JobPreempted(job_info, e)
     elif isinstance(e, RaySystemError):
@@ -131,8 +132,8 @@ class ExceptionInfo:
         ... except Exception:
         ...     exc_info = ExceptionInfo.ser_exc_info()
         ...
-        >>> # In another process/actor:
-        >>> exc_info.reraise()  # Re-raises the original ValueError
+        >>>
+        >>> exc_info.reraise()
     """
 
     ex: BaseException | None
@@ -149,7 +150,7 @@ class ExceptionInfo:
         Example:
             >>> exc_info = ExceptionInfo.ser_exc_info()
             >>> exc_type, exc_value, exc_tb = exc_info.restore()
-            >>> # Use with logging.Logger.error(exc_info=(exc_type, exc_value, exc_tb))
+            >>>
         """
         if self.ex is not None:
             exc_value = self.ex.with_traceback(self.tb.as_traceback())
@@ -173,8 +174,8 @@ class ExceptionInfo:
             ...     dangerous_operation()
             ... except Exception:
             ...     exc_info = ExceptionInfo.ser_exc_info()
-            >>> # Later, potentially in a different process:
-            >>> exc_info.reraise()  # Raises the original exception
+            >>>
+            >>> exc_info.reraise()
         """
         if self.ex is not None:
             raise self.ex.with_traceback(self.tb.as_traceback())
@@ -198,14 +199,14 @@ class ExceptionInfo:
             >>> try:
             ...     risky_function()
             ... except ValueError as e:
-            ...     exc_info = ExceptionInfo.ser_exc_info()  # Captures current context
+            ...     exc_info = ExceptionInfo.ser_exc_info()
 
             Capture specific exception:
 
             >>> try:
             ...     risky_function()
             ... except ValueError as e:
-            ...     exc_info = ExceptionInfo.ser_exc_info(e)  # Captures specific exception
+            ...     exc_info = ExceptionInfo.ser_exc_info(e)
         """
         if exception is None:
             _, exc_value, exc_traceback = sys.exc_info()
@@ -318,7 +319,7 @@ def print_remote_raise(ray_error) -> None:
         >>> try:
         ...     result = ray.get(future)
         ... except Exception as e:
-        ...     print_remote_raise(e)  # Prints the remote traceback
+        ...     print_remote_raise(e)
     """
     tb: Traceback = ray_error.cause.args[0].tb
     traceback.print_tb(tb.as_traceback())
@@ -338,17 +339,17 @@ class RefBox:
         ref: The Ray ObjectRef to be wrapped.
 
     Example:
-        >>> # Without RefBox, this would automatically dereference:
+        >>>
         >>> result_ref = expensive_computation.remote()
         >>> boxed = RefBox(result_ref)
-        >>> another_task.remote(boxed)  # Passes ref, not value
+        >>> another_task.remote(boxed)
         >>>
-        >>> # Later, explicitly get the value:
+        >>>
         >>> actual_result = boxed.get()
 
     See Also:
         Ray documentation on object passing:
-        https://docs.ray.io/en/latest/ray-core/objects.html#passing-object-arguments
+        https://docs.ray.io/en/latest/ray-core/objects.html
     """
 
     ref: ray.ObjectRef
@@ -365,7 +366,7 @@ class RefBox:
         Example:
             >>> computation_ref = expensive_task.remote()
             >>> box = RefBox(computation_ref)
-            >>> result = box.get()  # Blocks until computation completes
+            >>> result = box.get()
         """
         return ray.get(self.ref)
 
@@ -397,7 +398,7 @@ consistency when checking for completion states.
 
 Example:
     >>> queue.put(result)
-    >>> queue.put(DONE)  # Signal end of data
+    >>> queue.put(DONE)
     >>>
     >>> while True:
     ...     item = queue.get()
@@ -450,7 +451,7 @@ class SnitchRecipient:
         ...
         ...     def spawn_child(self):
         ...         child = ChildActor.remote()
-        ...         # Child will report failures to this parent
+        ...
         ...         return child
     """
 
@@ -508,13 +509,13 @@ def log_failures_to(parent, suppress: bool = False):
         ...
         ...     def risky_operation(self):
         ...         with log_failures_to(self.parent):
-        ...             # Any exception here will be reported to parent
+        ...
         ...             dangerous_computation()
 
         Suppressing exceptions:
 
         >>> with log_failures_to(parent_actor, suppress=True):
-        ...     might_fail()  # Exception logged but not re-raised
+        ...     might_fail()
     """
     try:
         yield
@@ -548,13 +549,13 @@ class StopwatchActor:
     Example:
         >>> stopwatch = StopwatchActor.remote()
         >>>
-        >>> # In various parts of your distributed code:
+        >>>
         >>> start_time = time.time()
         >>> expensive_computation()
         >>> duration = time.time() - start_time
         >>> stopwatch.measure.remote("computation", duration)
         >>>
-        >>> # Check performance stats:
+        >>>
         >>> total_time, count = ray.get(stopwatch.get.remote("computation"))
         >>> avg_time = ray.get(stopwatch.average.remote("computation"))
     """
@@ -583,7 +584,7 @@ class StopwatchActor:
             average times for all tracked operations.
 
         Example:
-            >>> # Measure database query time
+            >>>
             >>> start = time.time()
             >>> execute_query(sql)
             >>> duration = time.time() - start

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Universal path utilities for local and cloud storage.
 
@@ -34,15 +35,15 @@ Key Features:
 Example:
     >>> from eformer.paths import ePath
     >>>
-    >>> # Works with local paths
+    >>>
     >>> local_path = ePath("data/model.pkl")
     >>> local_path.write_bytes(data)
     >>>
-    >>> # Works with GCS paths
+    >>>
     >>> gcs_path = ePath("gs://bucket/model.pkl")
     >>> gcs_path.write_bytes(data)
     >>>
-    >>> # ML-specific utilities
+    >>>
     >>> ePath.save_jax_array(array, "gs://bucket/weights.npy")
     >>> loaded = ePath.load_jax_array("gs://bucket/weights.npy")
 
@@ -265,7 +266,7 @@ class LocalPath(UniversalPath):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
-            ...  # likely trying to write to /dev/null or similar
+            ...
         self.path.write_text(data, encoding=encoding)
 
     def read_bytes(self) -> bytes:
@@ -275,7 +276,7 @@ class LocalPath(UniversalPath):
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
-            ...  # likely trying to write to /dev/null or similar
+            ...
         self.path.write_bytes(data)
 
     def mkdir(self, parents: bool = True, exist_ok: bool = True) -> None:
@@ -628,13 +629,11 @@ class GCSPath(UniversalPath):
             raise ValueError("Cannot compute relative path across different buckets")
 
         if not other.blob_name:
-            # Relative to bucket root
             return GCSPath(f"gs://{self.bucket_name}/{self.blob_name}", self.client)
 
         self_parts = self.blob_name.strip("/").split("/")
         other_parts = other.blob_name.strip("/").split("/")
 
-        # Find common prefix
         common_len = 0
         for i, (a, b) in enumerate(zip(self_parts, other_parts)):  # noqa:B905
             if a == b:
@@ -707,7 +706,7 @@ class GCSPath(UniversalPath):
             "size": self.blob.size or 0,
             "mtime": self.blob.updated.timestamp() if self.blob.updated else 0,
             "ctime": self.blob.time_created.timestamp() if self.blob.time_created else 0,
-            "atime": self.blob.updated.timestamp() if self.blob.updated else 0,  # GCS doesn't track access time
+            "atime": self.blob.updated.timestamp() if self.blob.updated else 0,
             "etag": self.blob.etag,
             "content_type": self.blob.content_type,
             "generation": self.blob.generation,
@@ -787,11 +786,11 @@ class MLUtilPath(PathManager):
 
     Example:
         >>> path_manager = MLUtilPath()
-        >>> # Save JAX array
+        >>>
         >>> path_manager.save_jax_array(array, "gs://bucket/weights.npy")
-        >>> # Load JAX array
+        >>>
         >>> loaded = path_manager.load_jax_array("gs://bucket/weights.npy")
-        >>> # Save dictionary with JAX arrays
+        >>>
         >>> path_manager.save_dict({"weights": weights}, "config.json")
     """
 
@@ -908,9 +907,9 @@ class MLUtilPath(PathManager):
             dst: Destination path.
 
         Example:
-            >>> # Copy local to GCS
+            >>>
             >>> manager.copy_tree("data/", "gs://bucket/data/")
-            >>> # Copy GCS to local
+            >>>
             >>> manager.copy_tree("gs://bucket/model/", "local_model/")
         """
         if isinstance(src, str):

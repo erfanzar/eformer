@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import abc
 import time
 import typing as tp
@@ -58,13 +59,11 @@ class AutoShardingRule(ShardingRule):
         partition_spec = [None] * len(array_shape)
         remaining_axes = set(self.axis_names)
 
-        # Sort dimensions by size (descending)
         dim_order = np.argsort([-d if not self.reverse else d for d in array_shape])
 
         for dim_idx in dim_order:
             dim_size = array_shape[dim_idx]
 
-            # Find best matching mesh axis
             best_axis = None
             for axis in remaining_axes:
                 mesh_size = self.mesh.shape[axis]
@@ -96,7 +95,6 @@ class CompositeShardingRule(ShardingRule):
 
     def apply(self, pytree: tp.Any) -> tp.Any:
         def combine_specs(*specs):
-            # Return first non-empty PartitionSpec
             for spec in specs:
                 if spec != PartitionSpec():
                     return spec
@@ -127,10 +125,8 @@ class MemoryConstrainedShardingRule(ShardingRule):
         partition_spec = [None] * len(array.shape)
         remaining_size = array_size
 
-        # Sort axes by mesh size (descending)
         sorted_axes = sorted(self.axis_names, key=lambda x: self.mesh.shape[x], reverse=True)
 
-        # Sort dimensions by size (descending)
         dim_order = np.argsort([-d for d in array.shape])
 
         for dim_idx in dim_order:
@@ -256,7 +252,6 @@ def create_monitored_function(
     def monitored_fn(*args, **kwargs):
         start_time = time.time()
 
-        # Validate sharding before execution
         validation_issues = analyzer.validate_partition_specs(args[0], partition_specs)
         if validation_issues:
             warnings.warn(
@@ -264,11 +259,9 @@ def create_monitored_function(
                 stacklevel=1,
             )
 
-        # Execute function
         result = fn(*args, **kwargs)
         execution_time = time.time() - start_time
 
-        # Collect metrics
         metrics = {
             "execution_time": execution_time,
             "memory_usage": analyzer.estimate_memory_usage(args[0], partition_specs),
@@ -313,15 +306,15 @@ def barrier_sync(timeout: float = 200):
         - The timeout is converted to milliseconds for the underlying JAX API.
 
     Example:
-        >>> # In distributed training
+        >>>
         >>> model = train_step(model, batch)
-        >>> barrier_sync()  # Wait for all processes
+        >>> barrier_sync()
         >>> if jax.process_index() == 0:
-        ...     save_checkpoint(model)  # Only process 0 saves
-        >>> barrier_sync()  # Wait before continuing
+        ...     save_checkpoint(model)
+        >>> barrier_sync()
 
-        >>> # With custom timeout for long operations
-        >>> barrier_sync(timeout=600)  # Wait up to 10 minutes
+        >>>
+        >>> barrier_sync(timeout=600)
 
     Warning:
         Ensure all processes call barrier_sync() the same number of times and

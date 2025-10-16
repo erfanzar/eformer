@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import re
 import typing as tp
 
@@ -91,7 +92,7 @@ def estimate_available_memory() -> int:
     except Exception:
         pass
 
-    return max(available, 100 * 1024 * 1024)  # Minimum 100MB
+    return max(available, 100 * 1024 * 1024)
 
 
 def derive_base_prefix_from_path(path_str: str) -> str:
@@ -109,16 +110,15 @@ def derive_base_prefix_from_path(path_str: str) -> str:
     Returns:
         Base prefix for the path
     """
-    # Strip .safetensors.index.json
+
     if path_str.endswith(".safetensors.index.json"):
         return path_str[: -len(".safetensors.index.json")]
-    # Strip .safetensors
+
     if path_str.endswith(".safetensors"):
         prefix = path_str[: -len(".safetensors")]
     else:
         prefix = path_str
 
-    # If it's a shard name like ...-00001-of-00004, strip that part too
     m = re.match(r"^(.*)-\d{5}-of-\d{5}$", prefix)
     if m:
         return m.group(1)
@@ -241,7 +241,6 @@ def optimize_shard_layout(state: dict[str, jax.Array], max_shard_size_bytes: int
                     current_shard.append(key)
                     current_size += key_size
         else:
-            # Try to fit group in current shard
             if current_size + group_size > max_shard_size_bytes:
                 shards.append(current_shard)
                 current_shard = keys

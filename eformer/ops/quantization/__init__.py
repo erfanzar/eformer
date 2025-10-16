@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .implicit_array_1bit import Array1B
+from .implicit_array_8bit import Array8B
+from .implicit_array_nf4 import ArrayNF4
+from .implicit_array_rsr import RSROperatorBinary, RSROperatorTernary
 
-from ._imus import ImplicitArray, OrginArray, aux_field, implicit, register, ste, use_implicit
-
-__all__ = ("ImplicitArray", "OrginArray", "aux_field", "implicit", "register", "ste", "use_implicit")
+__all__ = ("Array1B", "Array8B", "ArrayNF4", "RSROperatorBinary", "RSROperatorTernary")

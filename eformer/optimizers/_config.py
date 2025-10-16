@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import json
 import typing as tp
 import warnings
@@ -115,7 +116,7 @@ class SchedulerConfig(SerializationMixin):
     learning_rate: float = 5e-5
     learning_rate_end: float | None = None
     warmup_steps: int | None = None
-    steps: int | None = None  # Required for non-constant schedulers
+    steps: int | None = None
     exponent: float = 1.0
 
     def __post_init__(self):
@@ -131,16 +132,14 @@ class SchedulerConfig(SerializationMixin):
         Raises:
             ValueError: If the configuration is invalid.
         """
-        # Validate steps requirements
+
         if self.scheduler_type is not None and self.steps is None:
             raise ValueError("Steps must be specified for non-constant schedulers")
 
-        # Type-specific validation
         if self.scheduler_type == "linear":
             if self.learning_rate_end is None:
                 raise ValueError("Linear scheduler requires learning_rate_end")
 
-        # Warmup validation
         if self.warmup_steps is not None:
             if self.steps is None:
                 raise ValueError("Steps required when using warmup")

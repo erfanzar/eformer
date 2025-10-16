@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """
 This module defines common types, constants, and named tuples used across the
 eformer library, particularly for JAX and sharding configurations.
@@ -30,7 +31,6 @@ class _Empty:
     pass
 
 
-# Type aliases for common JAX and Python types
 Array = jnp.ndarray
 """Type alias for JAX arrays."""
 PRNGKey = jnp.ndarray
@@ -55,7 +55,7 @@ Can be a single string (axis name), a tuple of strings, None (for no sharding),
 or potentially other types depending on context (though typically str or tuple[str, ...]).
 """
 
-# String constants representing semantic axis names for partitioning
+
 EMPTY = "_"
 BATCH = "__BATCH__"
 """Semantic axis name for the batch dimension."""
@@ -99,7 +99,7 @@ TP = TENSOR_PARALLEL
 EP = EXPERT_PARALLEL
 SP = SEQUENCE_PARALLEL
 
-# String constants representing runtime modes
+
 MODE_DECODE = "__autoregressive__"
 """Runtime mode for autoregressive decoding."""
 MODE_PREFILL = "__prefill__"
@@ -109,14 +109,14 @@ MODE_TRAIN = "__train__"
 MODE_INSERT = "__insert__"
 """Runtime mode for inserting into the cache."""
 
-# Set of modes considered as generation modes
+
 GENERATION_MODES = {
     MODE_DECODE,
     MODE_INSERT,
 }
 """Set of runtime modes considered as generation modes."""
 
-# Type alias for runtime modes
+
 RUNTIME_MODE_TYPES = tp.Literal[
     MODE_DECODE,
     MODE_PREFILL,
@@ -146,21 +146,21 @@ class HiddenStateSharding(DynamicShardingAxes):
     """Dynamic sharding specification for hidden states."""
 
     axes: tp.ClassVar = [BATCH, QUERY_LENGTH, EMBED]
-    mode: tp.ClassVar = 1  # Infer mode based on the second dimension (sequence length)
+    mode: tp.ClassVar = 1
 
 
 class AttnQSharding(DynamicShardingAxes):
     """Dynamic sharding specification for attention queries."""
 
     axes: tp.ClassVar = [BATCH, QUERY_LENGTH, HEAD, HEAD_DIM]
-    mode: tp.ClassVar = 1  # Infer mode based on the second dimension (sequence length)
+    mode: tp.ClassVar = 1
 
 
 class AttnKVSharding(DynamicShardingAxes):
     """Dynamic sharding specification for attention keys/values."""
 
     axes: tp.ClassVar = [BATCH, KV_LENGTH, KV_HEAD, KV_HEAD_DIM]
-    mode: tp.ClassVar = 1  # Infer mode based on the second dimension (sequence length)
+    mode: tp.ClassVar = 1
 
 
 class RowWise(DynamicShardingAxes):

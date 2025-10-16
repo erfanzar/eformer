@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from typing import Any, NamedTuple
 
 import chex
@@ -59,9 +60,9 @@ def scale_by_mars(
     mu_dtype = jax.dtypes.canonicalize_dtype(mu_dtype)
 
     def init_fn(params):
-        mu = otu.tree_zeros_like(params, dtype=mu_dtype)  # First moment
-        nu = otu.tree_zeros_like(params)  # Second moment
-        mog = otu.tree_zeros_like(params, dtype=mu_dtype)  # gradient from
+        mu = otu.tree_zeros_like(params, dtype=mu_dtype)
+        nu = otu.tree_zeros_like(params)
+        mog = otu.tree_zeros_like(params, dtype=mu_dtype)
         return ScaleByMarsState(count=jnp.zeros([], jnp.int32), mu=mu, nu=nu, mog=mog)
 
     def update_fn(updates, state, params=None):

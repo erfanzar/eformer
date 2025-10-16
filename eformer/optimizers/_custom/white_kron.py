@@ -1,3 +1,17 @@
+# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -866,11 +880,11 @@ def get_opt_state_partition_specs(params, **quad_kwargs):
         "noise_scale",
     }
     precond_kwargs = {k: v for k, v in quad_kwargs.items() if k in _allowed}
-    weight_decay = float(quad_kwargs.get("weight_decay", 0.0) or 0.0)  # no weight decay
+    weight_decay = float(quad_kwargs.get("weight_decay", 0.0) or 0.0)
     _no_constraint_kwargs = dict(precond_kwargs)
     _no_constraint_kwargs["params_partition_specs"] = None
     _no_constraint_kwargs["pipeline_axis_name"] = None
-    tx = _def_scale(**_no_constraint_kwargs)  # take out sharding args
+    tx = _def_scale(**_no_constraint_kwargs)
     state_shape = jax.eval_shape(tx.init, params)
     pipeline_axis_name = precond_kwargs.get("pipeline_axis_name", None)
     b1 = precond_kwargs.get("b1", 0.95)
@@ -1053,7 +1067,6 @@ def _preconditioning(
     total_numel = m * n
 
     if not diag_left and not diag_right:
-        # DD
         Pg = jax.numpy.linalg.multi_dot([Ql.T, Ql, Gn, Qr.T, Qr])
 
         key3, key4 = jax.random.split(key1)
@@ -1068,7 +1081,6 @@ def _preconditioning(
         Pg_out = jax.numpy.linalg.multi_dot([Ql_new.T, Ql_new, G, Qr_new.T, Qr_new])
 
     elif diag_left and not diag_right:
-        # dD
         Pg = (Ql * Ql)[:, None] * jax.numpy.linalg.multi_dot([Gn, Qr.T, Qr])
 
         term1L = jnp.sum(Pg * Pg, axis=1)
@@ -1082,7 +1094,6 @@ def _preconditioning(
         Pg_out = (Ql_new * Ql_new)[:, None] * jax.numpy.linalg.multi_dot([G, Qr_new.T, Qr_new])
 
     elif not diag_left and diag_right:
-        # Dd
         Pg = jax.numpy.linalg.multi_dot([Ql.T, Ql, Gn]) * (Qr * Qr)[None, :]
 
         term1L = Pg @ Pg.T
@@ -1096,7 +1107,6 @@ def _preconditioning(
         Pg_out = jax.numpy.linalg.multi_dot([Ql_new.T, Ql_new, G]) * (Qr_new * Qr_new)[None, :]
 
     else:
-        # dd
         Pg = (Ql * Ql)[:, None] * Gn * (Qr * Qr)[None, :]
 
         term1L = jnp.sum(Pg * Pg, axis=1)
@@ -1207,7 +1217,7 @@ def _unblock_cols(blocks, meta, block_size, B):
 def _merge_dims(shape):
     if len(shape) < 2:
         return shape
-    if np.prod(shape) == np.max(shape):  # 1d-like
+    if np.prod(shape) == np.max(shape):
         return (np.max(shape),)
     if len(shape) == 2:
         return shape

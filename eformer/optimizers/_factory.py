@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import dataclasses
 import difflib
 import inspect
@@ -229,8 +230,7 @@ class OptimizerFactory:
             ValueError: If the optimizer type is unsupported or the configuration is invalid.
             TypeError: If the configuration type is invalid.
         """
-        # Handle JAX-specific dtype conversions
-        # Validate optimizer type
+
         if optimizer_type not in cls._OPTIMIZER_REGISTRY:
             raise ValueError(
                 f"Unsupported optimizer: {optimizer_type}. Available: {list(cls._OPTIMIZER_REGISTRY.keys())}"
@@ -244,16 +244,11 @@ class OptimizerFactory:
         cls._convert_dtypes(optimizer_config)
         optimizer_cls, config_cls = cls._OPTIMIZER_REGISTRY[optimizer_type]
 
-        # Validate configuration type
         if not isinstance(optimizer_config, config_cls):
             raise TypeError(
                 f"Invalid config type {type(optimizer_config)} for optimizer {optimizer_type}. Expected {config_cls}"
             )
 
-        # Validate additional parameters
-        # cls._validate_kwargs(optimizer_config, kwargs)
-
-        # Create scheduler
         if scheduler_config.scheduler_type is None and scheduler_config.warmup_steps:
             raise ValueError("Warmup steps require specifying a scheduler type")
 
@@ -335,13 +330,11 @@ class OptimizerFactory:
         Returns:
             Tuple[optax.GradientTransformation, optax.Schedule]: A tuple containing the optimizer and scheduler.
         """
-        # Convert config to dictionary and merge with additional params
+
         config_dict = {k: v for k, v in vars(optimizer_config).items() if not k.startswith("_")}
 
-        # Create base optimizer
         optimizer = optimizer_cls(learning_rate=scheduler, **config_dict)
 
-        # Build transformation chain
         chain = []
 
         if common_kwargs.get("clip_grad"):
@@ -388,7 +381,6 @@ class OptimizerFactory:
             field_type = tp.get_type_hints(config_cls)[field.name]
             default = f" = {field.default}" if not isinstance(field.default, dataclasses._MISSING_TYPE) else ""
 
-            # Handle union types (e.g., Optional[int] = int | None)
             if hasattr(field_type, "__name__"):
                 type_name = field_type.__name__
             else:

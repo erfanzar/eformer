@@ -1,5 +1,3 @@
-# all of this part is a copy-paste from
-# https://github.com/stanford-crfm/levanter/blob/main/src/levanter/distributed.py
 # Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Cluster utilities for distributed execution with Ray and JAX.
 

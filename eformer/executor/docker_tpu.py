@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 """Docker TPU execution utilities for managing Docker images and containers on Google Cloud Platform.
 
 This module provides functionality for:
@@ -31,8 +33,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-# GCP Artifact Registry cleanup policy configuration
-# Automatically deletes images older than 24 hours and keeps only the 5 most recent versions
 GCP_CLEANUP_POLICY: list[dict[str, Any]] = [
     {
         "name": "delete-stale",
@@ -76,7 +76,7 @@ def copy_path(src: Path, dst: Path) -> None:
     Raises:
         RuntimeError: If the source path is neither a file nor a directory.
     """
-    # Delete destination if it exists
+
     remove_path(dst)
 
     if src.is_dir():
@@ -121,7 +121,6 @@ def run_command(argv: list[str]) -> bytes:
         try:
             return subprocess.check_output(argv, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
-            # print the output if the command failed, reraising the exception
             print(e.output.decode())
             raise e
 
@@ -265,7 +264,6 @@ def build_docker_image(
         "buildx",
         "build",
         "--platform=linux/amd64",
-        # "--progress=plain",
         "-t",
         f"{image_name}:{tag}",
     ]

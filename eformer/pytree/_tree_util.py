@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 from __future__ import annotations
 
 import dataclasses
@@ -163,7 +165,7 @@ def split(
 
     Examples:
         >>> tree = {"a": jnp.array([1, 2]), "b": jnp.array([3, 4])}
-        >>> # Split based on array size
+        >>>
         >>> large, small = split(tree, lambda x: x.size > 2)
     """
 
@@ -204,7 +206,7 @@ def merge(*pytrees: PyTree, is_leaf: IsLeafFn | None = None) -> PyTree:
         >>> tree1 = {"a": 1, "b": None}
         >>> tree2 = {"a": None, "b": 2}
         >>> merged = merge(tree1, tree2)
-        >>> # Result: {"a": 1, "b": 2}
+        >>>
     """
 
     def _combine(*args: tp.Any) -> tp.Any:
@@ -307,9 +309,9 @@ def tree_map_with_path(
         ...     lambda path, x: f"path={path}, value={x}",
         ...     tree
         ... )
-        >>> # Result: {"a": "path=('a',), value=1",
-        >>> #          "b": {"c": "path=('b', 'c'), value=2",
-        >>> #                "d": "path=('b', 'd'), value=3"}}
+        >>>
+        >>>
+        >>>
     """
 
     def _walk(path: tuple[str, ...], x):
@@ -346,8 +348,8 @@ def tree_flatten_with_paths(
     Examples:
         >>> tree = {"weights": jnp.array([1, 2]), "bias": jnp.array([3])}
         >>> paths_vals, treedef = tree_flatten_with_paths(tree)
-        >>> # paths_vals: [(('weights',), array([1, 2])),
-        >>> #              (('bias',), array([3]))]
+        >>>
+        >>>
     """
     paths_and_vals = []
 
@@ -373,7 +375,7 @@ def tree_leaves_with_paths(tree: PyTree, is_leaf: IsLeafFn | None = None) -> lis
     Examples:
         >>> tree = {"a": 1, "b": {"c": 2}}
         >>> paths_and_vals = tree_leaves_with_paths(tree)
-        >>> # Result: [(('a',), 1), (('b', 'c'), 2)]
+        >>>
     """
     paths_and_vals, _ = tree_flatten_with_paths(tree, is_leaf=is_leaf)
     return paths_and_vals
@@ -421,7 +423,7 @@ def tree_filter(tree: PyTree, predicate: tp.Callable[[tp.Any], bool]) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1, 2]), "b": jnp.array([3])}
         >>> filtered = tree_filter(tree, lambda x: x.size > 1)
-        >>> # Result: {"a": jnp.array([1, 2])}
+        >>>
     """
     flat, treedef = tu.tree_flatten(tree)
     filtered = [x for x in flat if predicate(x)]
@@ -442,7 +444,7 @@ def tree_concatenate(trees: list[PyTree], axis: int = 0) -> PyTree:
         >>> tree1 = {"a": jnp.array([1, 2])}
         >>> tree2 = {"a": jnp.array([3, 4])}
         >>> result = tree_concatenate([tree1, tree2])
-        >>> # Result: {"a": jnp.array([1, 2, 3, 4])}
+        >>>
     """
     return tu.tree_map(lambda *xs: jnp.concatenate(xs, axis=axis), *trees)
 
@@ -461,7 +463,7 @@ def tree_stack(trees: list[PyTree], axis: int = 0) -> PyTree:
         >>> tree1 = {"a": jnp.array([1, 2])}
         >>> tree2 = {"a": jnp.array([3, 4])}
         >>> result = tree_stack([tree1, tree2])
-        >>> # Result: {"a": jnp.array([[1, 2], [3, 4]])}
+        >>>
     """
     return tu.tree_map(lambda *xs: jnp.stack(xs, axis=axis), *trees)
 
@@ -482,7 +484,7 @@ def tree_where(condition: PyTree, x: PyTree, y: PyTree) -> PyTree:
         >>> x = {"a": jnp.array([1, 2])}
         >>> y = {"a": jnp.array([3, 4])}
         >>> result = tree_where(cond, x, y)
-        >>> # Result: {"a": jnp.array([1, 4])}
+        >>>
     """
     return tu.tree_map(lambda c, a, b: jnp.where(c, a, b), condition, x, y)
 
@@ -499,7 +501,7 @@ def tree_zeros_like(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.5, 2.5])}
         >>> zeros = tree_zeros_like(tree)
-        >>> # Result: {"a": jnp.array([0.0, 0.0])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.zeros_like(x) if is_array_like(x) else x, tree)
 
@@ -516,7 +518,7 @@ def tree_ones_like(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.5, 2.5])}
         >>> ones = tree_ones_like(tree)
-        >>> # Result: {"a": jnp.array([1.0, 1.0])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.ones_like(x) if is_array_like(x) else x, tree)
 
@@ -596,7 +598,7 @@ def flatten_mapping(
             path = (*prefix, key)
             result.update(_flatten(value, path))
         if keep_empty_nodes and is_empty:
-            if prefix == ():  # when the whole input is empty
+            if prefix == ():
                 return {}
             return {_key(prefix): empty_node}
         return result
@@ -739,7 +741,7 @@ def int_key_to_string(xs):
     Examples:
         >>> d = {(0, 1): 'value'}
         >>> int_key_to_string(d)
-        >>> # Result: {('0', '1'): 'value'}
+        >>>
     """
     flatten = False
     if not is_flatten(xs):
@@ -765,7 +767,7 @@ def string_key_to_int(xs):
     Examples:
         >>> d = {('0', '1'): 'value'}
         >>> string_key_to_int(d)
-        >>> # Result: {(0, 1): 'value'}
+        >>>
     """
     flatten = False
     if not is_flatten(xs):
@@ -811,7 +813,7 @@ def _dict_flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None, fumap
             path = (*prefix, key)
             result.update(_flatten(value, path))
         if keep_empty_nodes and is_empty:
-            if prefix == ():  # when the whole input is empty
+            if prefix == ():
                 return {}
             return {_key(prefix): empty_node}
         return result
@@ -917,7 +919,7 @@ def unflatten_dict(xs, sep=None):
     Examples:
         >>> flat = {('a', 'b'): 1, ('a', 'c'): 2}
         >>> unflatten_dict(flat)
-        >>> # Result: {'a': {'b': 1, 'c': 2}}
+        >>>
     """
     if isinstance(xs, dict):
         return _dict_unflatten_dict(xs=xs, sep=sep)
@@ -995,7 +997,7 @@ def tree_path_to_string(path: Path, sep: str | None = None) -> str:  # type:igno
         else:
             keys.append(str(key))
     if sep is None:
-        return tuple(keys)  # Return a tuple of strings if no separator
+        return tuple(keys)
     return sep.join(keys)
 
 
@@ -1289,7 +1291,7 @@ def tree_clip(tree: PyTree, min_val: tp.Any = None, max_val: tp.Any = None) -> P
     Examples:
         >>> tree = {"weights": jnp.array([-2, 0, 5, 10])}
         >>> clipped = tree_clip(tree, min_val=0, max_val=5)
-        >>> # Result: {"weights": array([0, 0, 5, 5])}
+        >>>
     """
 
     def clip_fn(x):
@@ -1314,7 +1316,7 @@ def tree_add(tree1: PyTree, tree2: PyTree) -> PyTree:
         >>> tree1 = {"a": jnp.array([1, 2]), "b": jnp.array([3])}
         >>> tree2 = {"a": jnp.array([4, 5]), "b": jnp.array([6])}
         >>> result = tree_add(tree1, tree2)
-        >>> # Result: {"a": array([5, 7]), "b": array([9])}
+        >>>
     """
     return tu.tree_map(lambda x, y: x + y, tree1, tree2)
 
@@ -1333,7 +1335,7 @@ def tree_subtract(tree1: PyTree, tree2: PyTree) -> PyTree:
         >>> tree1 = {"a": jnp.array([5, 7]), "b": jnp.array([9])}
         >>> tree2 = {"a": jnp.array([1, 2]), "b": jnp.array([3])}
         >>> result = tree_subtract(tree1, tree2)
-        >>> # Result: {"a": array([4, 5]), "b": array([6])}
+        >>>
     """
     return tu.tree_map(lambda x, y: x - y, tree1, tree2)
 
@@ -1350,19 +1352,18 @@ def tree_multiply(tree1: PyTree, tree2: PyTree | tp.Any) -> PyTree:
 
     Examples:
         >>> tree = {"a": jnp.array([1, 2]), "b": jnp.array([3])}
-        >>> # Scalar multiplication
-        >>> result1 = tree_multiply(tree, 2)
-        >>> # Result: {"a": array([2, 4]), "b": array([6])}
         >>>
-        >>> # Element-wise multiplication
+        >>> result1 = tree_multiply(tree, 2)
+        >>>
+        >>>
+        >>>
         >>> tree2 = {"a": jnp.array([2, 3]), "b": jnp.array([4])}
         >>> result2 = tree_multiply(tree, tree2)
-        >>> # Result: {"a": array([2, 6]), "b": array([12])}
+        >>>
     """
     if tu.tree_structure(tree1, is_leaf=lambda x: False) == tu.tree_structure(tree2, is_leaf=lambda x: False):
         return tu.tree_map(lambda x, y: x * y, tree1, tree2)
     else:
-        # Scalar multiplication
         return tu.tree_map(lambda x: x * tree2, tree1)
 
 
@@ -1378,19 +1379,18 @@ def tree_divide(tree1: PyTree, tree2: PyTree | tp.Any) -> PyTree:
 
     Examples:
         >>> tree = {"a": jnp.array([4.0, 6.0]), "b": jnp.array([8.0])}
-        >>> # Scalar division
-        >>> result1 = tree_divide(tree, 2.0)
-        >>> # Result: {"a": array([2.0, 3.0]), "b": array([4.0])}
         >>>
-        >>> # Element-wise division
+        >>> result1 = tree_divide(tree, 2.0)
+        >>>
+        >>>
+        >>>
         >>> tree2 = {"a": jnp.array([2.0, 3.0]), "b": jnp.array([4.0])}
         >>> result2 = tree_divide(tree, tree2)
-        >>> # Result: {"a": array([2.0, 2.0]), "b": array([2.0])}
+        >>>
     """
     if tu.tree_structure(tree1, is_leaf=lambda x: False) == tu.tree_structure(tree2, is_leaf=lambda x: False):
         return tu.tree_map(lambda x, y: x / y, tree1, tree2)
     else:
-        # Scalar division
         return tu.tree_map(lambda x: x / tree2, tree1)
 
 
@@ -1410,7 +1410,7 @@ def tree_dot(tree1: PyTree, tree2: PyTree) -> tp.Any:
         >>> tree1 = {"a": jnp.array([1, 2]), "b": jnp.array([3])}
         >>> tree2 = {"a": jnp.array([4, 5]), "b": jnp.array([6])}
         >>> result = tree_dot(tree1, tree2)
-        >>> # Result: (1*4 + 2*5) + (3*6) = 14 + 18 = 32
+        >>>
     """
     products = tu.tree_map(lambda x, y: jnp.sum(x * y) if is_array_like(x) else x * y, tree1, tree2)
     return tree_sum(products)
@@ -1440,13 +1440,13 @@ def tree_random_like(
         >>> key = jax.random.PRNGKey(0)
         >>> tree = {"weights": jnp.zeros((2, 3))}
         >>>
-        >>> # Normal distribution
+        >>>
         >>> result1 = tree_random_like(tree, key, "normal")
         >>>
-        >>> # Uniform distribution [0, 1)
+        >>>
         >>> result2 = tree_random_like(tree, key, "uniform")
         >>>
-        >>> # Uniform distribution [-1, 1]
+        >>>
         >>> result3 = tree_random_like(tree, key, "uniform", minval=-1, maxval=1)
     """
     leaves = tu.tree_leaves(tree)
@@ -1488,7 +1488,7 @@ def tree_cast(tree: PyTree, dtype: tp.Any) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1, 2], dtype=jnp.int32)}
         >>> result = tree_cast(tree, jnp.float32)
-        >>> # Result: {"a": array([1.0, 2.0], dtype=float32)}
+        >>>
     """
     return tu.tree_map(lambda x: x.astype(dtype) if is_array_like(x) else x, tree)
 
@@ -1506,10 +1506,10 @@ def tree_round(tree: PyTree, decimals: int = 0) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.234, 5.678])}
         >>> result = tree_round(tree, decimals=1)
-        >>> # Result: {"a": array([1.2, 5.7])}
         >>>
-        >>> result2 = tree_round(tree)  # Round to integers
-        >>> # Result: {"a": array([1., 6.])}
+        >>>
+        >>> result2 = tree_round(tree)
+        >>>
     """
     return tu.tree_map(lambda x: jnp.round(x, decimals) if is_array_like(x) else x, tree)
 
@@ -1526,7 +1526,7 @@ def tree_abs(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([-1, 2, -3]), "b": -4.5}
         >>> result = tree_abs(tree)
-        >>> # Result: {"a": array([1, 2, 3]), "b": 4.5}
+        >>>
     """
     return tu.tree_map(
         lambda x: jnp.abs(x) if is_array_like(x) else abs(x) if isinstance(x, int | float | complex) else x, tree
@@ -1545,7 +1545,7 @@ def tree_sign(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([-2.5, 0, 3.7])}
         >>> result = tree_sign(tree)
-        >>> # Result: {"a": array([-1., 0., 1.])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.sign(x) if is_array_like(x) else x, tree)
 
@@ -1562,7 +1562,7 @@ def tree_reciprocal(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([2.0, 4.0]), "b": jnp.array([0.5])}
         >>> result = tree_reciprocal(tree)
-        >>> # Result: {"a": array([0.5, 0.25]), "b": array([2.0])}
+        >>>
     """
     return tu.tree_map(lambda x: 1.0 / x if is_array_like(x) else x, tree)
 
@@ -1579,7 +1579,7 @@ def tree_sqrt(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([4.0, 9.0]), "b": jnp.array([16.0])}
         >>> result = tree_sqrt(tree)
-        >>> # Result: {"a": array([2.0, 3.0]), "b": array([4.0])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.sqrt(x) if is_array_like(x) else x, tree)
 
@@ -1596,7 +1596,7 @@ def tree_exp(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([0.0, 1.0]), "b": jnp.array([2.0])}
         >>> result = tree_exp(tree)
-        >>> # Result: {"a": array([1.0, 2.718...]), "b": array([7.389...])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.exp(x) if is_array_like(x) else x, tree)
 
@@ -1613,7 +1613,7 @@ def tree_log(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.e]), "b": jnp.array([jnp.e**2])}
         >>> result = tree_log(tree)
-        >>> # Result: {"a": array([0.0, 1.0]), "b": array([2.0])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.log(x) if is_array_like(x) else x, tree)
 
@@ -1631,12 +1631,12 @@ def tree_transpose(tree: PyTree, axes: tuple[int, ...] | None = None) -> PyTree:
     Examples:
         >>> tree = {"matrix": jnp.array([[1, 2], [3, 4]])}
         >>> result = tree_transpose(tree)
-        >>> # Result: {"matrix": array([[1, 3], [2, 4]])}
         >>>
-        >>> # With specific axes
+        >>>
+        >>>
         >>> tensor = {"data": jnp.ones((2, 3, 4))}
         >>> result = tree_transpose(tensor, axes=(2, 0, 1))
-        >>> # Result shape: {"data": array with shape (4, 2, 3)}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.transpose(x, axes) if is_array_like(x) else x, tree)
 
@@ -1654,11 +1654,11 @@ def tree_reshape(tree: PyTree, shape: tuple[int, ...]) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([[1, 2], [3, 4]])}
         >>> result = tree_reshape(tree, (4,))
-        >>> # Result: {"a": array([1, 2, 3, 4])}
         >>>
-        >>> # Using -1 for automatic dimension
+        >>>
+        >>>
         >>> result2 = tree_reshape(tree, (-1, 1))
-        >>> # Result: {"a": array([[1], [2], [3], [4]])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.reshape(x, shape) if is_array_like(x) else x, tree)
 
@@ -1676,12 +1676,12 @@ def tree_squeeze(tree: PyTree, axis: int | tuple[int, ...] | None = None) -> PyT
     Examples:
         >>> tree = {"a": jnp.array([[[1], [2]]])}
         >>> result = tree_squeeze(tree, axis=2)
-        >>> # Result: {"a": array([[1, 2]])}
         >>>
-        >>> # Squeeze all single dimensions
+        >>>
+        >>>
         >>> tree2 = {"b": jnp.array([[[3]]])}
         >>> result2 = tree_squeeze(tree2)
-        >>> # Result: {"b": array(3)}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.squeeze(x, axis) if is_array_like(x) else x, tree)
 
@@ -1699,10 +1699,10 @@ def tree_expand_dims(tree: PyTree, axis: int) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1, 2, 3])}
         >>> result = tree_expand_dims(tree, axis=0)
-        >>> # Result: {"a": array([[1, 2, 3]])} with shape (1, 3)
+        >>>
         >>>
         >>> result2 = tree_expand_dims(tree, axis=1)
-        >>> # Result: {"a": array([[1], [2], [3]])} with shape (3, 1)
+        >>>
     """
     return tu.tree_map(lambda x: jnp.expand_dims(x, axis) if is_array_like(x) else x, tree)
 
@@ -1719,11 +1719,11 @@ def tree_any(tree: PyTree) -> bool:
     Examples:
         >>> tree = {"a": jnp.array([False, False]), "b": jnp.array([True])}
         >>> tree_any(tree)
-        >>> # Result: True
+        >>>
         >>>
         >>> tree2 = {"x": jnp.array([0, 0]), "y": jnp.array([0])}
         >>> tree_any(tree2)
-        >>> # Result: False
+        >>>
     """
     leaves = tu.tree_leaves(tree)
     for leaf in leaves:
@@ -1747,11 +1747,11 @@ def tree_all(tree: PyTree) -> bool:
     Examples:
         >>> tree = {"a": jnp.array([True, True]), "b": jnp.array([True])}
         >>> tree_all(tree)
-        >>> # Result: True
+        >>>
         >>>
         >>> tree2 = {"x": jnp.array([1, 2]), "y": jnp.array([0])}
         >>> tree_all(tree2)
-        >>> # Result: False (because of the 0)
+        >>>
     """
     leaves = tu.tree_leaves(tree)
     for leaf in leaves:
@@ -1775,7 +1775,7 @@ def tree_isnan(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.nan, 3.0])}
         >>> result = tree_isnan(tree)
-        >>> # Result: {"a": array([False, True, False])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.isnan(x) if is_array_like(x) else False, tree)
 
@@ -1792,7 +1792,7 @@ def tree_isinf(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.inf, -jnp.inf])}
         >>> result = tree_isinf(tree)
-        >>> # Result: {"a": array([False, True, True])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.isinf(x) if is_array_like(x) else False, tree)
 
@@ -1810,7 +1810,7 @@ def tree_isfinite(tree: PyTree) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.nan, jnp.inf, 2.0])}
         >>> result = tree_isfinite(tree)
-        >>> # Result: {"a": array([True, False, False, True])}
+        >>>
     """
     return tu.tree_map(lambda x: jnp.isfinite(x) if is_array_like(x) else True, tree)
 
@@ -1828,7 +1828,7 @@ def tree_replace_nans(tree: PyTree, value: tp.Any = 0.0) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.nan, 3.0])}
         >>> result = tree_replace_nans(tree, value=-1.0)
-        >>> # Result: {"a": array([1.0, -1.0, 3.0])}
+        >>>
     """
 
     def replace_nan(x):
@@ -1852,7 +1852,7 @@ def tree_replace_infs(tree: PyTree, value: tp.Any = 0.0) -> PyTree:
     Examples:
         >>> tree = {"a": jnp.array([1.0, jnp.inf, -jnp.inf, 2.0])}
         >>> result = tree_replace_infs(tree, value=999.0)
-        >>> # Result: {"a": array([1.0, 999.0, 999.0, 2.0])}
+        >>>
     """
 
     def replace_inf(x):

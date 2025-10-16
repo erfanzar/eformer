@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import enum
 import threading
 from contextlib import contextmanager
@@ -50,9 +51,9 @@ def current_path():
         str: Current path as a slash-separated string, useful for error messages.
 
     Examples:
-        >>> # During deserialization of nested structure
+        >>>
         >>> path = current_path()
-        >>> # Returns something like "model/encoder/weights"
+        >>>
     """
     return "/".join(_error_context.path)
 
@@ -112,7 +113,7 @@ def to_state_dict(target) -> dict[str, Any]:
     Examples:
         >>> model = MyModel()
         >>> state = to_state_dict(model)
-        >>> # state is now a dictionary with model parameters
+        >>>
     """
     if _is_namedtuple(target):
         ty = _NamedTuple
@@ -141,7 +142,7 @@ def is_serializable(target):
     Examples:
         >>> is_serializable(my_model)
         True
-        >>> is_serializable(42)  # int is not registered
+        >>> is_serializable(42)
         False
     """
     if not isinstance(target, type):
@@ -209,10 +210,8 @@ def _namedtuple_state_dict(nt) -> dict[str, Any]:
 
 def _restore_namedtuple(xs, state_dict: dict[str, Any]):
     """Rebuild namedtuple from serialized dict."""
-    # Legacy format support for backward compatibility
+
     if set(state_dict.keys()) == {"name", "fields", "values"}:
-        # Convert legacy format to new format for compatibility
-        # Legacy format used separate fields and values dicts
         state_dict = {
             state_dict["fields"][str(i)]: state_dict["values"][str(i)] for i in range(len(state_dict["fields"]))
         }
@@ -413,9 +412,6 @@ def _unchunk_array_leaves_in_place(d):
     return d
 
 
-# Helper functions for serialization validation
-
-
 def validate_serializable(pytree) -> tuple[bool, list[str]]:
     """Validate if a pytree is fully serializable.
 
@@ -459,7 +455,6 @@ def get_serialization_info(pytree) -> dict[str, Any]:
         "is_serializable": is_serializable(pytree),
     }
 
-    # Check array types
     leaves = jax.tree_util.tree_leaves(pytree)
     dtypes = set()
     for leaf in leaves:
@@ -468,9 +463,6 @@ def get_serialization_info(pytree) -> dict[str, Any]:
     info["dtypes"] = list(dtypes)
 
     return info
-
-
-# User-facing API calls:
 
 
 def msgpack_serialize(pytree, in_place: bool = False) -> bytes:

@@ -117,7 +117,6 @@ def create_rst(name, children, output_dir, module_dotted=None):
       - name: A display name for the module/package (often the key from the hierarchy).
       - children: A dict (if a package) or a string (if a module).
       - output_dir: Where to write the file.
-      - module_dotted: The full module dotted name (e.g. "eformer.callib.triton_call").
         This is used to compute a consistent file name.
     """
     if isinstance(children, dict):

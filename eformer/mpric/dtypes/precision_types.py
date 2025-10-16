@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import jax
 import jax.extend
 import jax.numpy as jnp
 
 from eformer.jaximus import implicit
 
-# Data type mappings
 STRING_TO_DTYPE_MAP = {
     "bf16": jnp.bfloat16,
     "bfloat16": jnp.bfloat16,
@@ -85,7 +85,6 @@ def put_dtype(
 
 
 DTYPE_MAPPING = {
-    # Standard types
     "bf16": jnp.bfloat16,
     "f16": jnp.float16,
     "f32": jnp.float32,

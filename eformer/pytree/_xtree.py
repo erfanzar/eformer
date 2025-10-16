@@ -8,9 +8,10 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF tp.Any KIND, either express or implied.
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 import dataclasses
 import functools
@@ -399,13 +400,12 @@ def _dict_from_state_dict(target: dict | None, state: dict[str, tp.Any]) -> dict
     new_dict = {}
     target_dict = target if target else {}
     for k, v_state in state.items():
-        v_target = target_dict.get(k)  # Get corresponding value prototype from target
+        v_target = target_dict.get(k)
         new_dict[k] = xfrom_state_dict(v_target, v_state, name=k)
     return new_dict
 
 
 def _namedtuple_to_state_dict(target: tuple) -> dict[str, tp.Any]:
-    # Use _asdict() if available, otherwise iterate _fields
     if hasattr(target, "_asdict"):
         data = target._asdict()
     else:
@@ -428,12 +428,12 @@ def _namedtuple_from_state_dict(target: tuple | None, state: dict[str, tp.Any]) 
     deserialized_values = {}
     for field_name in target._fields:
         field_state = state[field_name]
-        field_target_value = getattr(target, field_name)  # Get prototype value
+        field_target_value = getattr(target, field_name)
         with _record_path(field_name):
             deserialized_values[field_name] = xfrom_state_dict(
                 field_target_value,
                 field_state,
-                name=field_name,  # Pass name for context
+                name=field_name,
             )
     try:
         return target_type(**deserialized_values)
@@ -562,7 +562,7 @@ class xTree:
         result = {}
         for field_obj in dataclasses.fields(self):
             value = getattr(self, field_obj.name)
-            if value is Ellipsis:  # Skip Ellipsis sentinel values
+            if value is Ellipsis:
                 continue
             if isinstance(value, tuple):
                 result[field_obj.name] = list(value)

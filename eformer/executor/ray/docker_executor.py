@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Docker execution utilities for Ray-based distributed computing.
 
 This module provides utilities for running Docker containers on distributed
@@ -130,7 +131,7 @@ def make_docker_run_command(config: DockerConfig) -> list[str]:
     Example:
         >>> config = DockerConfig(image="python:3.9", command="python app.py")
         >>> cmd = make_docker_run_command(config)
-        >>> # cmd = ["docker", "run", "--rm", "--network", "host", "python:3.9", "python app.py"]
+        >>>
     """
     cmd = ["docker", "run"]
 

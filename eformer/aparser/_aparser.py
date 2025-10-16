@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 import dataclasses
 import json
 import os
@@ -91,7 +93,6 @@ class DataClassArgumentParser(ArgumentParser):
         dataclass_types: DataClassType | tp.Iterable[DataClassType],
         **kwargs: tp.Any,
     ) -> None:
-        # Use ArgumentDefaultsHelpFormatter to show default values in --help if not specified
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = ArgumentDefaultsHelpFormatter
         super().__init__(**kwargs)
@@ -106,12 +107,11 @@ class DataClassArgumentParser(ArgumentParser):
         """
         Convert a dataclass field into a corresponding argparse argument.
         """
-        # Create long option names (e.g. --my_field and --my-field)
+
         long_options = [f"--{field.name}"]
         if "_" in field.name:
             long_options.append(f"--{field.name.replace('_', '-')}")
 
-        # Start with a copy of the field's metadata
         kwargs = field.metadata.copy()
 
         if isinstance(field.type, str):
@@ -119,17 +119,14 @@ class DataClassArgumentParser(ArgumentParser):
                 f"Unresolved type detected for field '{field.name}'. Ensure that type annotations are fully resolved."
             )
 
-        # Handle any aliases provided
         aliases = kwargs.pop("aliases", [])
         if isinstance(aliases, str):
             aliases = [aliases]
 
-        # Process union types (only tp.Optional[T] is supported)
         origin_type = getattr(field.type, "__origin__", None)
         if origin_type in (tp.Union, getattr(types, "UnionType", None)):
             union_args = field.type.__args__
             if len(union_args) == 2 and type(None) in union_args:
-                # tp.Optional[T] detected: choose the non-None type
                 field.type = next(arg for arg in union_args if arg is not type(None))
                 origin_type = getattr(field.type, "__origin__", None)
             else:
@@ -138,7 +135,6 @@ class DataClassArgumentParser(ArgumentParser):
                     f"field '{field.name}', got {field.type}."
                 )
 
-        # Special handling for booleans
         bool_kwargs: dict[str, tp.Any] = {}
         if field.type is bool:
             bool_kwargs = copy(kwargs)
@@ -147,7 +143,7 @@ class DataClassArgumentParser(ArgumentParser):
             kwargs["default"] = default_val
             kwargs["nargs"] = "?"
             kwargs["const"] = True
-        # Handle tp.Literal or Enum types as a fixed set of choices
+
         elif origin_type is tp.Literal or (isinstance(field.type, type) and issubclass(field.type, Enum)):
             if origin_type is tp.Literal:
                 kwargs["choices"] = field.type.__args__
@@ -175,7 +171,6 @@ class DataClassArgumentParser(ArgumentParser):
             else:
                 kwargs["required"] = True
 
-        # Only process union types that contain None
         current_type = kwargs["type"]
         type_args = tp.get_args(current_type)
 
@@ -253,7 +248,6 @@ class DataClassArgumentParser(ArgumentParser):
                 args_files.append(Path(sys.argv[0]).with_suffix(".args"))
 
             if args_file_flag:
-                # Create a temporary parser to extract file path(s)
                 args_file_parser = ArgumentParser(add_help=False)
                 args_file_parser.add_argument(args_file_flag, type=str, action="append")
                 cfg, args = args_file_parser.parse_known_args(args=args)
@@ -268,7 +262,7 @@ class DataClassArgumentParser(ArgumentParser):
 
             if args is None:
                 args = sys.argv[1:]
-            # Command-line arguments take precedence over those in files.
+
             args = file_args + args
 
         namespace, remaining_args = self.parse_known_args(args=args)
@@ -276,7 +270,7 @@ class DataClassArgumentParser(ArgumentParser):
         for dtype in self.dataclass_types:
             field_names = {f.name for f in dataclasses.fields(dtype) if f.init}
             init_args = {k: v for k, v in vars(namespace).items() if k in field_names}
-            # Remove used keys from the namespace
+
             for key in init_args:
                 delattr(namespace, key)
             outputs.append(dtype(**init_args))

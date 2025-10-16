@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Utilities for handling sharding in checkpoint serialization."""
 
 import json
@@ -55,10 +56,10 @@ def create_sharding_tree_from_index(
         specifications.
 
     Example:
-        >>> # Create default replicated shardings
+        >>>
         >>> shard_tree = create_sharding_tree_from_index("checkpoint/")
 
-        >>> # Create custom shardings based on array properties
+        >>>
         >>> def custom_shard_fn(info):
         ...     if "embedding" in info["path"]:
         ...         return NamedSharding(mesh, PartitionSpec("data", None))
@@ -80,7 +81,6 @@ def create_sharding_tree_from_index(
 
     version = index_data.get("version", "1.0")
 
-    # Get array info based on version and prefix
     if version == "2.0" and "prefixes" in index_data:
         if prefix:
             if prefix not in index_data["prefixes"]:
@@ -98,39 +98,30 @@ def create_sharding_tree_from_index(
     else:
         array_info = index_data.get("arrays", [])
 
-    # Build sharding tree
     shard_tree = {}
 
     for info in array_info:
         path = info["path"]
 
-        # Remove prefix from path if present
         if prefix and path.startswith(f"{prefix}/"):
             path = path[len(prefix) + 1 :]
 
-        # Convert path to nested dict keys
         parts = path.split("/")
 
-        # Determine sharding for this array
         if default_sharding is None:
-            # Default: fully replicated
             if mesh is None:
-                sharding = None  # Will be handled during deserialization
+                sharding = None
             else:
                 sharding = NamedSharding(mesh, PartitionSpec())
         elif callable(default_sharding):
-            # Custom function
             sharding = default_sharding(info)
         elif isinstance(default_sharding, PartitionSpec):
-            # Convert PartitionSpec to NamedSharding
             if mesh is None:
                 raise ValueError("Mesh required when using PartitionSpec as default_sharding")
             sharding = NamedSharding(mesh, default_sharding)
         else:
-            # Direct sharding object
             sharding = default_sharding
 
-        # Insert into tree
         current = shard_tree
         for part in parts[:-1]:
             if part not in current:
@@ -162,38 +153,30 @@ def apply_sharding_tree(
     import jax.tree_util as jtu
     from jax.sharding import SingleDeviceSharding
 
-    # Helper to create default sharding
     def default_sharding():
         if mesh is None:
             return SingleDeviceSharding(jax.devices()[0])
         else:
             return NamedSharding(mesh, PartitionSpec())
 
-    # Apply shardings using tree_map
     def apply_shard(array, shard_spec):
         if shard_spec is None:
-            # Use default replicated sharding
             shard_spec = default_sharding()
 
         if callable(shard_spec):
-            # If it's a function, call it with the array
             return shard_spec(array)
         elif isinstance(shard_spec, Sharding):
-            # Apply the sharding
             if hasattr(array, "shape"):
                 return jax.device_put(array, shard_spec)
             else:
                 return array
         else:
-            # Unknown spec, return as-is
             logger.warning(f"Unknown sharding spec type: {type(shard_spec)}")
             return array
 
-    # Use tree_map to apply shardings, handling mismatched structures gracefully
     try:
         result = jtu.tree_map(apply_shard, arrays, sharding_tree, is_leaf=lambda x: x is None or not isinstance(x, dict))
     except ValueError as e:
-        # Structure mismatch - apply what we can
         logger.warning(f"Sharding tree structure mismatch: {e}")
         result = arrays
 
@@ -213,11 +196,9 @@ def validate_sharding_tree(sharding_tree: dict, expected_structure: dict) -> boo
     import jax.tree_util as jtu
 
     try:
-        # Get the structure (treedef) of both trees
         _, tree_def = jtu.tree_flatten(sharding_tree)
         _, expected_def = jtu.tree_flatten(expected_structure)
 
-        # Compare structures
         return tree_def == expected_def
     except Exception as e:
         logger.warning(f"Error validating sharding tree: {e}")

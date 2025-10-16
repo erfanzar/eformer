@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from __future__ import annotations
 
 import argparse
@@ -260,7 +261,7 @@ class RayManager:
             "start",
             "--head",
             "--port=6379",
-            f"--resources={resources_str}",  # Fixed: Removed single quotes around resources_str
+            f"--resources={resources_str}",
             f"--node-ip-address={head_ip}",
             "--dashboard-host=0.0.0.0",
         ]
@@ -325,14 +326,13 @@ class RayManager:
             self.logger.info("Head-only node detected (no TPU resources)")
             return True
 
-        # Create verification script
         script_content = """
 import ray
 import time
 import sys
 import os
 
-# Try to connect multiple times
+
 for i in range(5):
     try:
         ray.init(address='auto')
@@ -340,24 +340,24 @@ for i in range(5):
     except Exception as e:
         print(f"Connection attempt {i+1} failed: {e}")
         time.sleep(5)
-        if i == 4:  # Last attempt failed
+        if i == 4:
             print("Could not connect to Ray cluster")
             sys.exit(1)
 
-# Print cluster resources
+
 try:
     resources = ray.cluster_resources()
     print("\\nCLUSTER RESOURCES:\\n==================")
     for k, v in sorted(resources.items()):
         print(f"{k}: {v}")
 
-    # Check if we have the expected TPUs
+
     tpu_count = resources.get('TPU', 0)
     print(f"\\nTOTAL TPU COUNT: {tpu_count}")
 
-    # Get expected TPU count from environment variable
+
     expected_tpu = int(os.environ.get('EXPECTED_TPU_COUNT', 64))
-    if tpu_count < expected_tpu * 0.9:  # Allow for 10% missing
+    if tpu_count < expected_tpu * 0.9:
         print(f"WARNING: Not all TPU cores are detected! Expected ~{expected_tpu}")
         sys.exit(2)
     else:
@@ -520,7 +520,6 @@ class ClusterManager:
         self.logger.info("Waiting for processes to fully stop...")
         time.sleep(5)
 
-        # Prepare head node resources
         head_resources = {
             "TPU": TPU_CORES_PER_HOST,
             f"TPU-{TPU_VERSION}-{TPU_SLICE_SIZE}-head": 1,
@@ -534,7 +533,6 @@ class ClusterManager:
         self.logger.info("Waiting for head node to initialize...")
         time.sleep(10)
 
-        # Start worker nodes
         for i, worker_ip in enumerate(worker_ips):
             self.logger.info(f"Starting worker node at {worker_ip}")
             worker_resources = {
@@ -570,7 +568,6 @@ class ClusterManager:
             self.logger.info("Running as head-only node (no TPU resources)")
         self.logger.info(f"Using Ray command: {self.ray_manager.ray_path}")
 
-        # Check if Ray is available
         try:
             result = subprocess.run([self.ray_manager.ray_path, "--version"], capture_output=True, check=True, text=True)
             self.logger.info(f"Ray version: {result.stdout.strip()}")
@@ -581,7 +578,6 @@ class ClusterManager:
             self.logger.error(f"Exec {e!s}")
             return 1
 
-        # Stop any existing Ray processes
         self.logger.info("Stopping any existing Ray processes...")
         try:
             subprocess.run([self.ray_manager.ray_path, "stop"], stderr=subprocess.DEVNULL)
@@ -593,7 +589,6 @@ class ClusterManager:
             self.ray_manager.run_command(f"{self.ray_manager.ray_path} stop")
             return 0
 
-        # Determine head IP
         is_external_head = external_head_ip and local_ip == external_head_ip
         if external_head_ip:
             head_ip = external_head_ip
@@ -604,7 +599,6 @@ class ClusterManager:
                 return 1
             head_ip = ips_to_use[0]
 
-        # Check if current machine is the head
         is_head_node = is_external_head or (local_ip == head_ip and not external_head_ip)
 
         if is_head_node:
@@ -678,7 +672,6 @@ class ArgumentParser:
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
 
-        # General options
         general_group = parser.add_argument_group("General Options")
         general_group.add_argument(
             "--log-level",
@@ -688,7 +681,6 @@ class ArgumentParser:
         )
         general_group.add_argument("--log-file", help="Path to log file (if not specified, logs to console only)")
 
-        # Cluster configuration
         cluster_group = parser.add_argument_group("Cluster Configuration")
         cluster_group.add_argument("--external", action="store_true", help="Use external IPs instead of internal IPs")
         cluster_group.add_argument(
@@ -710,7 +702,6 @@ class ArgumentParser:
         )
         cluster_group.add_argument("--ssh-user", default=SSH_USER, help=f"SSH username to use (default: {SSH_USER})")
 
-        # IP configuration
         ip_group = parser.add_argument_group("IP Configuration")
         ip_group.add_argument("--config", help="Path to YAML config file with IP addresses")
         ip_group.add_argument("--internal-ips", help="Comma-separated list of internal IPs for all slices")
@@ -718,7 +709,6 @@ class ArgumentParser:
         ip_group.add_argument("--slice-config", help="Path to YAML config file with slice configurations")
         ip_group.add_argument("--head-node-ip", help="IP address of external head node (if not using first IP in list)")
 
-        # Operation modes
         operation_group = parser.add_argument_group("Operation Modes")
         operation_group.add_argument("--stop", action="store_true", help="Stop the Ray cluster")
         operation_group.add_argument("--verify", action="store_true", help="Verify the Ray cluster setup")
@@ -741,7 +731,6 @@ def main():
 
     logger.debug(f"Command line arguments: {vars(args)}")
 
-    # Update global variables from arguments
     global TPU_VERSION, TPU_SLICE_SIZE, SSH_USER, INTERNAL_IPS, EXTERNAL_IPS
     TPU_VERSION = args.tpu_version
     TPU_SLICE_SIZE = args.tpu_slice
@@ -760,11 +749,9 @@ def main():
             logger.error("Failed to read configuration from YAML file.")
             return 1
 
-    # Initialize managers
     ray_manager = RayManager()
     cluster_manager = ClusterManager(ray_manager)
 
-    # Handle different operation modes
     if args.self_job:
         return cluster_manager.setup_self_job_node(args)
     else:

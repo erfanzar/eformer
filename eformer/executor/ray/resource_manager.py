@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Resource management system for Ray-based distributed computing.
 
 This module provides comprehensive resource management capabilities for Ray execution,
@@ -181,7 +182,7 @@ class RayResources:
             >>> print(f"CPUs: {resources.num_cpus}, GPUs: {resources.num_gpus}")
             CPUs: 4, GPUs: 2
         """
-        resources = dict(resource_spec)  # Make a copy
+        resources = dict(resource_spec)
         num_cpus = resources.pop("CPU", 0)
         num_gpus = resources.pop("GPU", 0)
 
@@ -264,7 +265,7 @@ class RayResources:
             >>> def add(x, y):
             ...     return x + y
             >>> result = RayResources.separate_process_fn(add, (2, 3), {})
-            >>> print(result)  # 5
+            >>> print(result)
         """
 
         def target_fn(queue, args, kwargs):
@@ -346,7 +347,7 @@ class RayResources:
 
         Example:
             >>> futures = [my_remote_fn.remote(i) for i in range(10)]
-            >>> # If something goes wrong, cancel all pending tasks
+            >>>
             >>> RayResources.cancel_all_futures(futures)
         """
         for future in futures:
@@ -495,7 +496,7 @@ class ComputeResourceConfig(Protocol):
 
         Example:
             >>> config = GpuAcceleratorConfig(gpu_model="A100")
-            >>> print(config.hardware_identifier())  # "A100"
+            >>> print(config.hardware_identifier())
         """
         return None
 
@@ -535,7 +536,7 @@ class ComputeResourceConfig(Protocol):
         Example:
             >>> config = CpuAcceleratorConfig(core_count=4)
             >>> resources = config.to_ray_resources()
-            >>> print(resources.num_cpus)  # 4
+            >>> print(resources.num_cpus)
         """
         ...
 
@@ -644,7 +645,7 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
 
         Example:
             >>> config = CpuAcceleratorConfig()
-            >>> print(config.hardware_identifier())  # None
+            >>> print(config.hardware_identifier())
         """
         return None
 
@@ -748,9 +749,9 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
 
         Example:
             >>> config = GpuAcceleratorConfig(gpu_model="A100")
-            >>> print(config.hardware_identifier())  # "A100"
+            >>> print(config.hardware_identifier())
             >>> generic_config = GpuAcceleratorConfig()
-            >>> print(generic_config.hardware_identifier())  # None
+            >>> print(generic_config.hardware_identifier())
         """
         return self.gpu_model
 
@@ -867,7 +868,7 @@ class TpuAcceleratorConfig(ComputeResourceConfig):
 
         Example:
             >>> config = TpuAcceleratorConfig(tpu_version="TPU-V4")
-            >>> print(config.hardware_identifier())  # "TPU-V4"
+            >>> print(config.hardware_identifier())
         """
         return self.tpu_version
 

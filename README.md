@@ -12,13 +12,11 @@
 The library is organized into several core modules:
 
 - **`aparser`**: Advanced argument parsing utilities with dataclass integration
-- **`callib`**: Custom function calling and Triton kernel integration
 - **`common_types`**: Shared type definitions and sharding constants
 - **`escale`**: Distributed sharding and parallelism utilities
 - **`executor`**: Execution management and hardware-specific optimizations
 - **`jaximus`**: Custom PyTree implementations and structured array utilities
 - **`mpric`**: Mixed precision training and dynamic scaling infrastructure
-- **`ops`**: Optimized operations including Flash Attention and quantization
 - **`optimizers`**: Flexible optimizer configuration and factory patterns
 - **`pytree`**: Enhanced tree manipulation and transformation utilities
 
@@ -42,30 +40,18 @@ Tools for efficient sharding and distributed computation in JAX, allowing you to
 
 Enhanced utilities for creating custom PyTrees and `ArrayValue` objects, updated from Equinox, providing flexible data structures for your models.
 
-### 4. Triton Integration (`callib`)
-
-Custom function calling utilities with direct integration of Triton kernels in JAX, allowing you to optimize performance-critical operations.
-
-### 5. Optimizer Factory
+### 4. Optimizer Factory
 
 A flexible factory for creating and configuring optimizers like AdamW, Adafactor, Lion, and RMSProp, making it easy to experiment with different optimization strategies.
-
-### 6. Optimized Operations (`ops`)
-
-- Flash Attention 2 implementation for GPUs/TPUs (via Triton and Pallas) for faster attention computations
-- 8-bit and NF4 quantization for efficient model deployment
-- Additional optimized operations under active development
 
 ## API Documentation
 
 For detailed API references and usage examples, see:
 
 - [Argument Parser (`aparser`)](docs/api_docs/aparser.rst)
-- [Triton Integration (`callib`)](docs/api_docs/callib.rst)
 - [Sharding Utilities (`escale`)](docs/api_docs/escale.rst)
 - [Execution Management (`executor`)](docs/api_docs/executor.rst)
 - [Mixed Precision Infrastructure (`mpric`)](docs/api_docs/mpric.rst)
-- [Custom Operations (`ops`)](docs/api_docs/ops.rst)
 
 ## Installation
 
@@ -94,7 +80,6 @@ handler = PrecisionHandler(
 ```python
 import jax
 from eformer.jaximus import ArrayValue, implicit
-from eformer.ops.quantization.quantization_functions import dequantize_row_q8_0, quantize_row_q8_0
 
 class Array8B(ArrayValue):
     scale: jax.Array

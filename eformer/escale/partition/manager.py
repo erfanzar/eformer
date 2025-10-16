@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """
 This module provides classes and functions for managing JAX sharding configurations
 and applying sharding constraints within a context.
@@ -215,30 +216,27 @@ class PartitionAxis(xTree):
             """Helper to get a field's value, prioritizing resolved values."""
             return resolved_values.get(name, getattr(self, name))
 
-        # Resolve standard axis defaults
         resolve_field(
             "batch_axis",
             lambda: (self.fully_sharded_data_parallel_axis, self.data_parallel_axis),
         )
         resolve_field("sequence_axis", lambda: self.sequence_parallel_axis)
         resolve_field("query_sequence_axis", lambda: self.sequence_parallel_axis)
-        # Default qS = S rule
+
         resolve_field("head_axis", lambda: self.tensor_parallel_axis)
         resolve_field("kv_head_axis", lambda: self.tensor_parallel_axis)
         resolve_field("key_sequence_axis", lambda: self.sequence_parallel_axis)
-        # Default kS = S rule
+
         resolve_field("hidden_state_axis", lambda: self.tensor_parallel_axis)
         resolve_field("mlp_intermediate_axis", lambda: self.tensor_parallel_axis)
         resolve_field("vocab_axis", lambda: self.tensor_parallel_axis)
         resolve_field("expert_axis", lambda: self.expert_parallel_axis)
 
-        # Resolve generation-specific axis defaults based on standard axes
         resolve_field("decode_batch_axis", lambda: get_resolved("batch_axis"))
         resolve_field("decode_head_axis", lambda: get_resolved("head_axis"))
         resolve_field("decode_kv_head_axis", lambda: get_resolved("kv_head_axis"))
         resolve_field("decode_key_sequence_axis", lambda: get_resolved("key_sequence_axis"))
 
-        # Ensure all fields are included in resolved_values, even if not NOT_GIVEN
         for fld in dataclasses.fields(self):
             if fld.name not in resolved_values and fld.name not in [
                 "_SEMANTIC_MAP",
@@ -246,11 +244,9 @@ class PartitionAxis(xTree):
             ]:
                 resolved_values[fld.name] = getattr(self, fld.name)
 
-        # Update the instance attributes with the resolved values
         for name, value in resolved_values.items():
             object.__setattr__(self, name, value)
 
-        # Perform a safety check to ensure all NOT_GIVEN values were resolved
         self._safety_check()
 
     def _safety_check(self):

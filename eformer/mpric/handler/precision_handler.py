@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from functools import partial
 from typing import Any
 
@@ -74,32 +75,24 @@ class PrecisionHandler:
         """Wrap training step with precision and loss scaling handling."""
 
         def wrapped_step(*args, **kwargs):
-            # Cast inputs to compute precision
             args = jax.tree_util.tree_map(self.cast_for_compute, args)
             kwargs = jax.tree_util.tree_map(self.cast_for_compute, kwargs)
 
-            # Run forward pass and get loss and gradients
             loss, grads = training_step_fn(*args, **kwargs)
 
-            # Scale loss for better numerical stability
             scaled_loss = self.loss_scaler.scale(loss)
 
-            # The gradients should be computed with respect to the scaled loss
-            # so we pass the scaled_loss back along with the unscaled gradients
             grads = self.loss_scaler.unscale(grads)
 
-            # Check gradient finiteness
             grads_finite = jax.tree_util.tree_reduce(
                 lambda x, y: x and jnp.all(jnp.isfinite(y)),
                 grads,
                 True,
             )
 
-            # Update loss scaler state
             self.loss_scaler = self.loss_scaler.adjust(grads_finite)
 
-            # Cast outputs back to output precision
-            unscaled_loss = self.loss_scaler.unscale(scaled_loss)  # Unscale the loss before returning
+            unscaled_loss = self.loss_scaler.unscale(scaled_loss)
             final_loss = self.cast_for_output(unscaled_loss)
             final_grads = jax.tree_util.tree_map(self.cast_for_output, grads)
 

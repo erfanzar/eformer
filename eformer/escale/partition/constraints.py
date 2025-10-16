@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+
 import os
 import re
 import typing as tp
@@ -342,13 +344,12 @@ def get_corrected_named_sharding(
         if raise_mesh_error:
             raise
         else:
-            # Create a dummy empty mesh to return replicated sharding
             mesh = Mesh(np.empty((0,), dtype=np.int32), [])
             warnings.warn(
                 "No active mesh found. Returning replicated NamedSharding on empty mesh.",
                 stacklevel=2,
             )
-            return NamedSharding(mesh, PartitionSpec())  # Replicated on empty mesh
+            return NamedSharding(mesh, PartitionSpec())
 
     if mesh.empty:
         warnings.warn(
@@ -358,7 +359,7 @@ def get_corrected_named_sharding(
         return NamedSharding(mesh, PartitionSpec())
 
     ndim = len(shape)
-    original_spec = partition_spec  # Keep original name for clarity
+    original_spec = partition_spec
 
     if len(original_spec) == 0:
         return NamedSharding(mesh, PartitionSpec())
@@ -557,7 +558,6 @@ def analyze_sharding_strategy(
         if spec != PartitionSpec():
             analysis["sharded_parameters"] += np.prod(array.shape)
 
-        # Calculate per-device memory
         sharded_size = total_size
         for _, name in enumerate(spec):
             if name is not None:
@@ -565,7 +565,6 @@ def analyze_sharding_strategy(
 
         return sharded_size
 
-    # Traverse the pytree and collect statistics
     tu.tree_map_with_path(analyze_leaf, pytree, partition_specs)
 
     return analysis
@@ -684,21 +683,17 @@ def get_axes_size_in_mesh(axis_names: AxisType, mesh: Mesh | None = None) -> int
     if mesh is None:
         mesh = get_incontext_mesh()
 
-    # Assuming mesh.shape behaves like a dictionary {axis_name: size}
     mesh_shape: dict[str, int] = mesh.shape
 
     if isinstance(axis_names, str):
-        # Raises KeyError if axis_names is not a valid key
         return mesh_shape[axis_names]
     elif isinstance(axis_names, list | tuple):
         product = 1
-        # Iterate in the provided order, though order doesn't matter for product
+
         for axis in axis_names:
-            # Raises KeyError if axis is not a valid key
             product *= mesh_shape[axis]
         return product
     else:
-        # Handle unexpected type for axis_names
         raise TypeError(f"axis_names must be str or Sequence[str], got {type(axis_names)}")
 
 
@@ -745,19 +740,16 @@ def get_mesh_axis_size(axis_names: AxisType) -> int:
         TypeError: If axis_names is not a str or a sequence of str.
     """
     if isinstance(axis_names, str):
-        # Size along a single axis dimension
         return lax.psum(1, axis_name=axis_names)
     elif isinstance(axis_names, list | tuple):
         if not axis_names:
-            return 1  # The size of a submesh with zero dimensions is 1
+            return 1
 
-        # Calculate the product of sizes along each specified axis
         product = 1
         for axis in axis_names:
             product *= lax.psum(1, axis_name=axis)
         return product
-        # Alternative using math.prod (Python 3.8+)
-        # return math.prod(lax.psum(1, axis_name=ax) for ax in axis_names)
+
     else:
         raise TypeError(f"Input 'axis_names' must be a string or sequence (list/tuple), but got type {type(axis_names)}")
 
@@ -785,23 +777,19 @@ def get_submesh_device_index(axis_names: AxisType) -> int:
         TypeError: If axis_names is not a str or a sequence of str.
     """
     if isinstance(axis_names, str):
-        # Index along a single axis dimension
         return lax.axis_index(axis_name=axis_names)
     elif isinstance(axis_names, list | tuple):
         if not axis_names:
-            return 0  # Index within a zero-dimensional submesh is 0
+            return 0
 
         linear_index = 0
         stride = 1
-        # Iterate from the minor axis to the major axis (reverse of the input order)
-        # This implements the formula: idx = sum(local_idx[dim] * stride[dim])
-        # where stride[dim] = product(size[k] for k > dim)
+
         for axis in reversed(axis_names):
             index_on_axis = lax.axis_index(axis_name=axis)
             linear_index += index_on_axis * stride
 
-            # Update stride for the next (more major) dimension
-            axis_size = lax.psum(1, axis_name=axis)  # Use lax.psum, not the other func
+            axis_size = lax.psum(1, axis_name=axis)
             stride *= axis_size
         return linear_index
     else:

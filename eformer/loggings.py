@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -119,14 +119,11 @@ class LazyLogger:
         logger = logging.getLogger(self._name)
         logger.propagate = False
 
-        # Set the logging level
         logger.setLevel(self._level)
 
-        # Create a console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(self._level)
 
-        # Use our custom color formatter
         formatter = ColorFormatter()
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
@@ -176,7 +173,7 @@ class ProgressLogger:
         >>> progress = ProgressLogger("Training")
         >>> for i in range(100):
         ...     progress.update(i, 100, f"Processing batch {i}")
-        ...     # Do work
+        ...
         >>> progress.complete("Training finished!")
     """
 
@@ -215,15 +212,12 @@ class ProgressLogger:
         if total <= 0:
             return
 
-        # Calculate progress
         progress = min(current / total, 1.0)
         progress_pct = progress * 100
 
-        # Create progress bar
         filled = int(bar_width * progress)
         bar = "\u2588" * filled + "\u2591" * (bar_width - filled)
 
-        # Calculate ETA
         eta_str = ""
         if show_eta and current > 0:
             elapsed = time.time() - self.start_time
@@ -237,20 +231,17 @@ class ProgressLogger:
                 else:
                     eta_str = f" ETA: {remaining / 3600:.1f}h"
 
-        # Format the complete message
         timestamp = time.strftime("%H:%M:%S")
         full_message = f"({timestamp} {self.name}) [{bar}] {progress_pct:5.1f}% {message}{eta_str}"
         if extra_info:
             full_message += f" {extra_info}"
 
         if self.use_tty:
-            # Clear previous line and write new progress
             sys.stdout.write("\r" + " " * self._last_message_length + "\r")
             sys.stdout.write(full_message)
             sys.stdout.flush()
             self._last_message_length = len(full_message)
         else:
-            # Fall back to regular logging
             self._logger.info(f"{progress_pct:.1f}% - {message}")
 
     def update_simple(self, message: str) -> None:

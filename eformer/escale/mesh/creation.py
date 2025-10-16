@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """JAX mesh creation utilities for distributed computation.
 
 This module provides utilities for creating and managing JAX meshes for distributed
@@ -31,21 +32,21 @@ Key Features:
     - Caching for efficient mesh reuse
 
 Typical Usage:
-    >>> # Create a simple mesh with data and model parallelism
+    >>>
     >>> mesh = create_mesh(
     ...     axis_dims=(2, 4),
     ...     axis_names=('data', 'model')
     ... )
     >>> with mesh:
-    ...     # Use mesh for sharded computation
+    ...
     ...     pass
 
-    >>> # Parse mesh from string configuration
+    >>>
     >>> mesh = parse_mesh_from_string("dp:2,tp:4", ["dp", "tp"])
 
-    >>> # CPU-only execution for debugging
+    >>>
     >>> with cpu_context() as mesh:
-    ...     # All operations run on CPU
+    ...
     ...     pass
 """
 
@@ -247,7 +248,6 @@ def _cached_mesh_impl(
         return tuple(int(v) for v in shp)
 
     if num_slices > 1:
-        # Multi-slice configuration (typically TPU pods)
         global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
 
         dynamic_axis = next((i for i, dim in enumerate(global_mesh_shape) if dim % num_slices == 0), None)
@@ -278,7 +278,6 @@ def _cached_mesh_impl(
         )
 
     elif process_count > 1:
-        # Multi-process configuration
         local_mesh_shape = np.arange(local_devices).reshape(axis_dims).shape
 
         if dcn_mesh_dims is None:
@@ -304,7 +303,6 @@ def _cached_mesh_impl(
         )
 
     else:
-        # Single-process configuration
         global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
         ndarray = create_device_mesh(
             mesh_shape=global_mesh_shape,

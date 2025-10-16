@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import typing as tp
 import warnings
 
@@ -26,7 +27,7 @@ class OptaxScheduledWeightDecayState(tp.NamedTuple):
     State for the scheduled weight decay optimizer.
     """
 
-    count: chex.Array  # Step count
+    count: chex.Array
 
 
 def optax_add_scheduled_weight_decay(
@@ -68,7 +69,7 @@ def optax_add_scheduled_weight_decay(
         if params is None:
             raise ValueError("Params cannot be None for weight decay!")
 
-        weight_decay = schedule_fn(state.count)  # Get scheduled decay rate
+        weight_decay = schedule_fn(state.count)
         updates = jax.tree_util.tree_map(lambda g, p: g + weight_decay * p, updates, params)
         return updates, OptaxScheduledWeightDecayState(count=optax.safe_int32_increment(state.count))
 
