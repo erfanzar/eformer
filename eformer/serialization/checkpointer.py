@@ -32,7 +32,6 @@ automatic checkpoint management without manual intervention.
 
 import datetime as dt
 import json
-import os
 import queue
 import threading
 import time
@@ -45,6 +44,7 @@ import jax
 import jax.numpy as jnp
 from fsspec import AbstractFileSystem
 from jax.experimental import multihost_utils as mh
+from jax.sharding import Mesh
 
 from eformer.loggings import get_logger
 from eformer.pytree import PyTree
@@ -137,7 +137,7 @@ class Checkpointer:
         # In training loop
         for step, batch in enumerate(train_loader):
             # ... training code ...
-            checkpointer.on_step(training_state)
+            checkpointer.on_step(training_state, step)
 
         # Wait for all saves to complete
         checkpointer.wait_until_finished()
@@ -225,7 +225,7 @@ class Checkpointer:
             except FileNotFoundError:
                 pass
 
-    def on_step(self, info: tp.Any, force: bool = False) -> None:
+    def on_step(self, pytree: tp.Any, force: bool = False, *, step: int) -> None:
         """Process a training step and save checkpoint if policies dictate.
 
         This method should be called once per training step. It evaluates both
@@ -234,7 +234,7 @@ class Checkpointer:
         consistency in distributed settings.
 
         Args:
-            info: Training state object containing at least a 'step' attribute (int)
+            pytree: Training state object containing at least a 'step' attribute (int)
                 and optionally a 'state' attribute (PyTree to save). The exact structure
                 depends on your training framework.
             force: If True, force a permanent checkpoint save regardless of policies.
@@ -253,13 +253,12 @@ class Checkpointer:
             # Regular usage in training loop
             for step, batch in enumerate(dataloader):
                 loss = train_step(state, batch)
-                checkpointer.on_step(state)  # Automatic checkpoint management
+                checkpointer.on_step(state, step=4000)  # Automatic checkpoint management
 
             # Force save at end of training
-            checkpointer.on_step(state, force=True)
+            checkpointer.on_step(state, force=True, step=4000)
             ```
         """
-        step = int(info.step)
 
         if step == 0 and not force:
             self._last_save_time = self._dt_now_injection()
@@ -281,10 +280,9 @@ class Checkpointer:
             my_should_save = True
             my_save_permanent = False
 
-        # Decide on host 0 and broadcast to all hosts
         flags = jnp.array([my_should_save, my_save_permanent], dtype=jnp.bool_)
-        should_save, save_permanent = mh.broadcast_one_to_all(flags)
-        should_save, save_permanent = bool(should_save), bool(save_permanent)
+        flags = mh.broadcast_one_to_all(flags)
+        should_save, save_permanent = bool(flags[0].item()), bool(flags[1].item())
 
         if not should_save:
             return
@@ -297,12 +295,14 @@ class Checkpointer:
         last_tmp = self._last_temporary_checkpoint
         destination = f"step-{step}"
 
-        self._last_temporary_checkpoint = os.path.join(self.base_path, destination) if not save_permanent else None
+        self._last_temporary_checkpoint = (
+            fsspec_utils.join_path(self.base_path, destination) if not save_permanent else None
+        )
 
         def callback():
             try:
                 _write_checkpoint_metadata(
-                    os.path.join(self.base_path, destination),
+                    fsspec_utils.join_path(self.base_path, destination),
                     step=step,
                     is_temporary=not save_permanent,
                 )
@@ -321,7 +321,12 @@ class Checkpointer:
                 except FileNotFoundError:
                     logger.warning(f"Could not load metadata for last temporary checkpoint {last_tmp}.")
 
-        self.save_checkpoint(info, destination, commit_callback=callback, is_temporary=not save_permanent)
+        self.save_checkpoint(
+            pytree,
+            destination,
+            commit_callback=callback,
+            is_temporary=not save_permanent,
+        )
 
     def save_checkpoint(
         self,
@@ -330,11 +335,14 @@ class Checkpointer:
         *,
         commit_callback: Callable[[], None] | None = None,
         is_temporary: bool = False,
-        mesh: tp.Any = None,
+        mesh: Mesh = None,
         step: int = -1,
         shardings: tp.Any = None,
         partition_rules: tp.Any = None,
         prefix: str | None = None,
+        structured: bool = False,
+        dtype: jnp.dtype | None = None,
+        extras: dict | None = None,
     ) -> None:
         """Save a checkpoint to the specified destination.
 
@@ -391,29 +399,55 @@ class Checkpointer:
             )
             ```
         """
-        path = os.path.join(self.base_path, destination)
+        path = fsspec_utils.join_path(self.base_path, destination)
         fsspec_utils.mkdirs(path)
 
         logger.info(f"Saving checkpoint to {path}")
 
-        # Use the AsyncCheckpointManager TS path; do_all_gather=False preserves sharding
-        self._manager.save_tree(
-            tree=tree,
-            path=path,
-            mesh=mesh,
-            prefix=prefix,  # optional sub-prefix if you want multiple trees
-            do_all_gather=False,
-            cpu_offload=False,
-            metadata={"is_temporary": is_temporary, "step": step},
-            callback=commit_callback,
-        )
+        if structured:
+            # Treedef-preserving save with prefix required
+            if not prefix:
+                raise ValueError("prefix is required when structured=True")
+
+            self._manager.save_pytree(
+                pytree=tree,
+                path=path,
+                mesh=mesh,
+                prefix=prefix,
+                do_all_gather=False,
+                cpu_offload=False,
+                dtype=dtype,
+                extras={**(extras or {}), "step": int(step)},
+                write_index=True,
+            )
+            # Write discovery metadata.json (and invoke optional callback)
+            _write_checkpoint_metadata(path, step=int(step), is_temporary=is_temporary)
+            if commit_callback is not None:
+                commit_callback()
+        else:
+            # Non-structured TS save (array leaves only), async with commit callback
+            def _after_commit():
+                _write_checkpoint_metadata(path, step=int(step), is_temporary=is_temporary)
+                if commit_callback is not None:
+                    commit_callback()
+
+            self._manager.save_tree(
+                tree=tree,
+                path=path,
+                mesh=mesh,
+                prefix=prefix,
+                do_all_gather=False,
+                cpu_offload=False,
+                metadata={"is_temporary": is_temporary, "step": step, **(extras or {})},
+                callback=_after_commit,
+            )
 
         self._last_save_step = int(step)
         self._last_save_time = self._dt_now_injection()
 
     def load_checkpoint(
         self,
-        mesh: tp.Any,
+        mesh: Mesh,
         *,
         path: str | None = None,
         discover_latest: bool = True,
@@ -421,6 +455,7 @@ class Checkpointer:
         partition_rules: tp.Any = None,
         dtype: tp.Any = None,
         prefix: str | None = None,
+        structured: bool = False,
     ) -> tuple[PyTree, MetadataDict]:
         """Load a checkpoint from disk with automatic discovery.
 
@@ -489,14 +524,26 @@ class Checkpointer:
             root = discovered
 
         logger.info(f"Loading checkpoint from {root}")
-        tree, meta = self._manager.load(
-            path=root,
-            mesh=mesh,
-            shardings=shardings,
-            partition_rules=partition_rules,
-            dtype=dtype,
-            prefix=prefix,
-        )
+
+        if structured:
+            if not prefix:
+                raise ValueError("prefix is required when structured=True")
+            tree, meta = self._manager.load_pytree(
+                path=self._manager.safe_loadpath(root),
+                mesh=mesh,
+                prefix=prefix,
+                partition_rules=partition_rules,
+                dtype=dtype,
+            )
+        else:
+            tree, meta = self._manager.load(
+                path=root,
+                mesh=mesh,
+                shardings=shardings,
+                partition_rules=partition_rules,
+                dtype=dtype,
+                prefix=prefix,
+            )
         return tree, meta
 
     def wait_until_finished(self) -> None:
@@ -521,7 +568,7 @@ class Checkpointer:
             # At end of training
             for step in range(num_steps):
                 train_step(state)
-                checkpointer.on_step(state)
+                checkpointer.on_step(state, step=step)
 
             checkpointer.wait_until_finished()
             print("All checkpoints saved and cleaned up")
@@ -608,6 +655,100 @@ class Checkpointer:
         current_policy = next((p for p in self.step_policies if p.until is None or p.until >= step), None)
         return None if current_policy is None else current_policy.every
 
+    def save_pytree(
+        self,
+        tree: PyTree,
+        prefix: str,
+        *,
+        step: int,
+        destination: str | None = None,
+        mesh: Mesh = None,
+        dtype: jnp.dtype | None = None,
+        extras: dict | None = None,
+        temporary: bool = False,
+        write_index: bool = True,
+    ) -> str:
+        """
+        Save a PyTree under a specific prefix with treedef preserved (structured checkpoint).
+
+        Args:
+            tree: PyTree to save.
+            prefix: Namespace/prefix (e.g., "tx", "model").
+            step: Training step for metadata.json.
+            destination: Optional subdir under base_path. Defaults to f"step-{step}".
+            mesh: Optional JAX Mesh for sharding context.
+            dtype: Optional dtype cast for floating values before saving.
+            extras: Optional extra metadata to store in checkpoint_metadata.json.
+            temporary: If True, mark checkpoint as temporary in metadata.json.
+            write_index: Whether to (re)write the TensorStore index.
+
+        Returns:
+            The checkpoint directory path (base_path/destination).
+        """
+        if not prefix or not isinstance(prefix, str):
+            raise ValueError("A non-empty string prefix is required")
+
+        dest = destination or f"step-{int(step)}"
+        path = fsspec_utils.join_path(self.base_path, dest)
+        fsspec_utils.mkdirs(path)
+
+        # Use AsyncCheckpointManager.save_pytree (treedef-preserving)
+        self._manager.save_pytree(
+            pytree=tree,
+            path=path,
+            mesh=mesh,
+            prefix=prefix,
+            do_all_gather=False,  # preserve sharding
+            cpu_offload=False,
+            dtype=dtype,
+            extras={**(extras or {}), "step": int(step)},
+            write_index=write_index,
+        )
+
+        _write_checkpoint_metadata(path, step=int(step), is_temporary=temporary)
+
+        return path
+
+    def load_pytree(
+        self,
+        mesh: Mesh,
+        *,
+        prefix: str,
+        path: str | None = None,
+        discover_latest: bool = True,
+        partition_rules: tp.Any = None,
+        dtype: jnp.dtype | None = None,
+    ) -> tuple[PyTree, MetadataDict]:
+        """
+        Load a treedef-preserving PyTree saved under a specific prefix.
+
+        Args:
+            mesh: JAX Mesh for array sharding on load.
+            prefix: Namespace/prefix (e.g., "tx", "model") used at save time.
+            path: Optional exact checkpoint directory; if None, uses base_path.
+            discover_latest: If True, auto-pick latest checkpoint under base_path/path.
+            partition_rules: Optional partition rules for sharding.
+            dtype: Optional dtype cast after loading.
+
+        Returns:
+            (pytree, extras_metadata)
+        """
+        root = path or self.base_path
+        if discover_latest:
+            discovered = find_latest_checkpoint(root)
+            if discovered is None:
+                raise FileNotFoundError(f"No checkpoint found under {root}")
+            root = discovered
+
+        pytree, extras = self._manager.load_pytree(
+            path=self._manager.safe_loadpath(root),
+            mesh=mesh,
+            prefix=prefix,
+            partition_rules=partition_rules,
+            dtype=dtype,
+        )
+        return pytree, extras
+
 
 def _write_checkpoint_metadata(checkpoint_path: str, step: int, is_temporary: bool) -> None:
     """Save checkpoint metadata to a JSON file.
@@ -633,7 +774,7 @@ def _write_checkpoint_metadata(checkpoint_path: str, step: int, is_temporary: bo
         "is_temporary": bool(is_temporary),
     }
     if jax.process_index() == 0:
-        with fs.open(os.path.join(plain_path, "metadata.json"), "w") as out:
+        with fs.open(fsspec_utils.join_path(plain_path, "metadata.json"), "w") as out:
             json.dump(meta, out)
 
 
@@ -666,7 +807,7 @@ def _read_checkpoint_metadata(checkpoint_path: str, fs: AbstractFileSystem | Non
         fs, plain_path = _parse_storage_path(checkpoint_path)
     else:
         _, plain_path = _parse_storage_path(checkpoint_path, fs)
-    with fs.open(os.path.join(plain_path, "metadata.json")) as f:
+    with fs.open(fsspec_utils.join_path(plain_path, "metadata.json")) as f:
         return json.load(f)
 
 
@@ -713,23 +854,22 @@ def find_latest_checkpoint(base_path: str) -> str | None:
     """
     fs, plain_base = _parse_storage_path(base_path)
 
-    def is_ckpt_dir(path: str) -> bool:
-        return fs.exists(os.path.join(path, "metadata.json"))
+    def contains_checkpoint(path: str) -> bool:
+        return fs.exists(fsspec_utils.join_path(path, "metadata.json"))
 
-    # List immediate subdirs and also consider base_path itself
     try:
-        candidates = [p for p in fs.glob(os.path.join(plain_base, "*")) if fs.isdir(p)]
+        candidates = [p for p in fs.glob(fsspec_utils.join_path(plain_base, "*")) if fs.isdir(p)]
     except FileNotFoundError:
         return None
     candidates.append(plain_base)
 
-    ckpts = [p for p in candidates if is_ckpt_dir(p)]
+    ckpts = [p for p in candidates if contains_checkpoint(p)]
     if not ckpts:
         logger.warning(f"No checkpoints found under {base_path}")
         return None
 
     def sort_key(path: str):
-        meta = json.load(fs.open(os.path.join(path, "metadata.json")))
+        meta = json.load(fs.open(fsspec_utils.join_path(path, "metadata.json")))
         ts = dt.datetime.fromisoformat(meta.get("timestamp"))
         step = int(meta.get("step", -1))
         return (ts, step)

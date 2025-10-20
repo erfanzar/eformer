@@ -23,6 +23,7 @@ This module provides efficient checkpoint saving and loading with support for:
 - SafeTensors format compatibility
 """
 
+from . import fsspec_utils
 from .async_manager import AsyncCheckpointManager
 from .base_manager import CheckpointManager
 from .checkpointer import Checkpointer, CheckpointInterval
@@ -33,6 +34,7 @@ __all__ = (
     "CheckpointInterval",
     "CheckpointManager",
     "Checkpointer",
+    "fsspec_utils",
     "tree_deserialize_leaves",
     "tree_serialize_leaves",
 )

@@ -39,6 +39,7 @@ dependencies = [
 	"braceexpand>=0.1.7",
 	"chex>=0.1.89",
 	"jaxtyping>=0.3.2",
+	"fsspec>=2025.9.0",
 ]
 
 [project.urls]
