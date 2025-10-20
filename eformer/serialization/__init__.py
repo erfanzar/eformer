@@ -25,11 +25,14 @@ This module provides efficient checkpoint saving and loading with support for:
 
 from .async_manager import AsyncCheckpointManager
 from .base_manager import CheckpointManager
+from .checkpointer import Checkpointer, CheckpointInterval
 from .serialization import tree_deserialize_leaves, tree_serialize_leaves
 
 __all__ = (
     "AsyncCheckpointManager",
+    "CheckpointInterval",
     "CheckpointManager",
+    "Checkpointer",
     "tree_deserialize_leaves",
     "tree_serialize_leaves",
 )

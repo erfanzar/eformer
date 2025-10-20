@@ -43,7 +43,6 @@ from eformer.serialization.serialization import leaf_key_paths
 
 from .base_manager import CheckpointManager
 from .serialization import tree_deserialize_leaves, tree_serialize_leaves
-from .sharding_utils import make_itsharded
 from .utils import derive_base_prefix_from_path, index_filename
 from .utils import read_process_array as _read_process_array
 from .utils import to_host as _to_host
@@ -438,19 +437,19 @@ class AsyncCheckpointManager:
         if not is_flatten(tree):
             tree = flatten_dict(tree, sep=".")
         if mesh is None:
-            logger.warn("`mesh` should be provided otherwise you will face some sharding issues.")
+            logger.warning("`mesh` should be provided otherwise you will face some sharding issues.")
             mesh = create_cpu_mesh()
         if gather_fns:
             tree = self._gather_fn(tree, gather_fns)
-        if do_all_gather:
+
+        if do_all_gather and not self.use_tensorstore:
             tree = jax.tree_util.tree_map(
                 lambda x: _to_host(x, float_dtype, mesh, cpu_offload),
                 tree,
                 is_leaf=lambda x: isinstance(x, jax.Array | np.generic | float | int),
             )
-
-        if jax.process_count() > 1:
-            tree = make_itsharded(tree, mesh)
+        elif do_all_gather and self.use_tensorstore and self.verbose:
+            logger.warning("Ignoring do_all_gather for TensorStore backend to preserve sharding (TP+FSDP).")
 
         checkpoint_meta = CheckpointMetadata(timestamp=datetime.now().isoformat(), custom_metadata=metadata)
 
@@ -915,10 +914,10 @@ class AsyncCheckpointManager:
         Returns:
             ePathLike: Cleaned path suitable for loading.
         """
-        if AsyncCheckpointManager.is_tensorstore:
-            if str(path).endswith("tensorstore_index.json"):
-                return ePath(str(path)[: -len("tensorstore_index.json")])
-        return ePath(path)
+        p = str(path)
+        if AsyncCheckpointManager.is_tensorstore(p) and p.endswith("tensorstore_index.json"):
+            return ePath(p[: -len("tensorstore_index.json")])
+        return ePath(p)
 
     def save_pytree(
         self,

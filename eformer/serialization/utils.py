@@ -405,20 +405,37 @@ def broadcast_tensor(
     Returns:
         Broadcasted tensor
     """
-    if jax.process_index() == 0:
-        chunks = chunk_tensor_by_memory(tensor, memory_limit_bytes)
-    else:
-        chunks = [jnp.zeros_like(tensor)]
+    size_bytes = estimate_array_nbytes(tensor)
+    n_chunks = max(1, (size_bytes + memory_limit_bytes - 1) // memory_limit_bytes)
 
-    broadcasted_chunks = []
-    for chunk in chunks:
-        broadcasted = jax.experimental.multihost_utils.broadcast_one_to_all(chunk)
-        broadcasted_chunks.append(broadcasted)
-
-    if len(broadcasted_chunks) > 1:
-        result = jnp.concatenate(broadcasted_chunks, axis=0)
+    slices = []
+    if tensor.ndim == 0 or n_chunks == 1:
+        slices = [slice(None)]
     else:
-        result = broadcasted_chunks[0]
+        total = tensor.shape[0]
+        base = total // n_chunks
+        rem = total % n_chunks
+        start = 0
+        for i in range(n_chunks):
+            extra = 1 if i < rem else 0
+            end = start + base + extra
+            slices.append(slice(start, end))
+            start = end
+
+    pieces = []
+    for slc in slices:
+        if jax.process_index() == 0:
+            piece = tensor[slc] if slc != slice(None) else tensor
+        else:
+            if slc == slice(None):
+                piece = jnp.zeros_like(tensor)
+            else:
+                length = slc.stop - slc.start
+                piece = jnp.zeros((length, *tensor.shape[1:]), dtype=tensor.dtype)
+        b = jax.experimental.multihost_utils.broadcast_one_to_all(piece)
+        pieces.append(b)
+
+    result = pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces, axis=0)
     if target_sharding is not None:
         result = jax.device_put(result, target_sharding)
     return result

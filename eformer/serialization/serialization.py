@@ -392,6 +392,16 @@ def tree_deserialize_leaves(
             if key in shardings:
                 apply_tree_shardings.append(shardings[key])
             else:
+                if (
+                    mesh is not None
+                    and hasattr(mesh, "axis_names")
+                    and len(mesh.axis_names) > 1
+                    and partition_rules is None
+                ):
+                    raise ValueError(
+                        f"No sharding specified for '{key}' on multi-axis mesh. "
+                        f"Provide 'shardings' or 'partition_rules'."
+                    )
                 apply_tree_shardings.append(NamedSharding(mesh=mesh, spec=PartitionSpec()))
         if partition_rules is not None:
             partition_rules = match_partition_rules(
