@@ -16,10 +16,10 @@
 
 """High-level checkpoint management for eFormer.
 
-This module provides a sophisticated checkpoint manager with time- and step-based
+This module provides a sophisticated checkpoint manager with time- and run-based
 policies for training workflows. Key features include:
 
-- **Flexible Checkpoint Policies**: Configure time-based and step-based saving policies
+- **Flexible Checkpoint Policies**: Configure time-based and run-based saving policies
 - **TensorStore Backend**: Efficient storage for large-scale distributed arrays
 - **TP+FSDP Compatibility**: No all-gather required, preserves existing shardings
 - **Async Operations**: Non-blocking checkpoint saves with background cleanup
@@ -63,7 +63,7 @@ Callable = tp.Callable
 
 @dataclass(frozen=True)
 class CheckpointInterval:
-    """Configuration for step-based checkpoint saving policy.
+    """Configuration for run-based checkpoint saving policy.
 
     Defines when to save checkpoints based on training steps. Multiple intervals
     can be combined to create sophisticated checkpoint policies (e.g., save every
@@ -96,10 +96,10 @@ class CheckpointInterval:
 
 
 class Checkpointer:
-    """High-level checkpoint manager with time- and step-based policies for eFormer.
+    """High-level checkpoint manager with time- and run-based policies for eFormer.
 
     This class provides automatic checkpoint management for training loops with support
-    for both time-based and step-based saving policies. It integrates with JAX's
+    for both time-based and run-based saving policies. It integrates with JAX's
     distributed training capabilities and TensorStore for efficient storage.
 
     Key Features:
@@ -107,7 +107,7 @@ class Checkpointer:
           training stages
         - Time-based saves: Automatically save at regular time intervals
         - Temporary checkpoints: Distinguish between temporary (time-based) and permanent
-          (step-based) checkpoints
+          (run-based) checkpoints
         - Async cleanup: Background deletion of old temporary checkpoints
         - Multi-host support: Coordinated saves across distributed training hosts
         - TensorStore backend: Efficient storage without all-gather operations
@@ -118,7 +118,7 @@ class Checkpointer:
     Attributes:
         base_path: Root directory for all checkpoints.
         save_interval: Optional time interval for temporary checkpoint saves.
-        step_policies: Sequence of step-based checkpoint policies.
+        step_policies: Sequence of run-based checkpoint policies.
 
     Examples:
         ```python
@@ -160,7 +160,7 @@ class Checkpointer:
             base_path: Root directory where all checkpoints will be saved. Can be
                 a local path or a cloud storage path (e.g., "gs://bucket/path").
             save_interval: Time interval for automatic temporary checkpoint saves.
-                If None, only step-based saves will occur. Temporary checkpoints
+                If None, only run-based saves will occur. Temporary checkpoints
                 are automatically cleaned up when newer checkpoints are saved.
             step_policies: Sequence of checkpoint interval policies. Policies must
                 be sorted by 'until' value, and only the last policy can have
@@ -225,26 +225,45 @@ class Checkpointer:
             except FileNotFoundError:
                 pass
 
-    def on_step(self, pytree: tp.Any, force: bool = False, *, step: int) -> None:
+    def on_step(
+        self,
+        mesh: Mesh,
+        pytree: tp.Any | None = None,
+        force: bool = False,
+        *,
+        step: int,
+        true_callbacks: list[tp.Callable[[str, Mesh, dict], None]] | None = None,
+        extras: dict | None = None,
+    ) -> None:
         """Process a training step and save checkpoint if policies dictate.
 
         This method should be called once per training step. It evaluates both
-        time-based and step-based policies to determine whether to save a checkpoint.
+        time-based and run-based policies to determine whether to save a checkpoint.
         The decision is made on process 0 and broadcast to all processes to ensure
         consistency in distributed settings.
 
         Args:
-            pytree: Training state object containing at least a 'step' attribute (int)
-                and optionally a 'state' attribute (PyTree to save). The exact structure
-                depends on your training framework.
+            mesh: JAX mesh for distributed arrays. Required for checkpoint saving
+                with proper sharding. Passed to save_checkpoint and callbacks.
+            pytree: Training state PyTree to save. Can be None if only using
+                true_callbacks to handle checkpoint saving externally.
             force: If True, force a permanent checkpoint save regardless of policies.
                 Useful for saving at the end of training or before evaluation.
+            step: Current training step number. Used to determine if checkpoint
+                should be saved based on step_policies.
+            true_callbacks: Optional list of callback functions to execute when a
+                checkpoint save is triggered. Each callback receives three arguments:
+                destination (str), mesh (Mesh), and metadata (dict). Useful for custom
+                checkpoint handling logic.
+            extras: Optional dictionary of extra metadata to include in the checkpoint.
+                This metadata will be passed to save_checkpoint and stored with the
+                checkpoint.
 
         Note:
             - Step 0 is skipped unless force=True (initialization step)
             - Duplicate step saves are skipped unless force=True
             - Time-based saves create temporary checkpoints (auto-cleaned)
-            - Step-based saves create permanent checkpoints
+            - run-based saves create permanent checkpoints
             - All processes synchronize on the save decision via broadcast
             - Old temporary checkpoints are queued for async deletion
 
@@ -253,10 +272,29 @@ class Checkpointer:
             # Regular usage in training loop
             for step, batch in enumerate(dataloader):
                 loss = train_step(state, batch)
-                checkpointer.on_step(state, step=4000)  # Automatic checkpoint management
+                checkpointer.on_step(my_mesh, state, step=step)
 
             # Force save at end of training
-            checkpointer.on_step(state, force=True, step=4000)
+            checkpointer.on_step(my_mesh, state, force=True, step=final_step)
+
+            # With custom callbacks
+            def log_save(destination: str, mesh: Mesh, metadata: dict):
+                print(f"Saved to {destination} with step {metadata.get('step')}")
+
+            checkpointer.on_step(
+                my_mesh,
+                state,
+                step=step,
+                true_callbacks=[log_save]
+            )
+
+            # With extras metadata
+            checkpointer.on_step(
+                my_mesh,
+                state,
+                step=step,
+                extras={"loss": float(loss), "accuracy": float(acc)}
+            )
             ```
         """
 
@@ -293,7 +331,7 @@ class Checkpointer:
             logger.info(f"Saving temporary checkpoint at step {step}.")
 
         last_tmp = self._last_temporary_checkpoint
-        destination = f"step-{step}"
+        destination = f"run-{step}"
 
         self._last_temporary_checkpoint = (
             fsspec_utils.join_path(self.base_path, destination) if not save_permanent else None
@@ -321,12 +359,19 @@ class Checkpointer:
                 except FileNotFoundError:
                     logger.warning(f"Could not load metadata for last temporary checkpoint {last_tmp}.")
 
-        self.save_checkpoint(
-            pytree,
-            destination,
-            commit_callback=callback,
-            is_temporary=not save_permanent,
-        )
+        if pytree is not None:
+            self.save_checkpoint(
+                pytree,
+                destination,
+                commit_callback=callback,
+                is_temporary=not save_permanent,
+                mesh=mesh,
+                extras=extras,
+            )
+        if true_callbacks is not None:
+            for save_callback in true_callbacks:
+                save_callback(destination, mesh, dict)
+            callback()
 
     def save_checkpoint(
         self,
@@ -365,10 +410,20 @@ class Checkpointer:
                 Defaults to -1 if not specified.
             shardings: Optional sharding specifications for arrays in the tree.
                 If None, existing shardings are preserved from the tree.
+                Only used in non-structured mode.
             partition_rules: Optional partition rules for automatic sharding.
                 Typically not needed if arrays already have shardings.
+                Only used in non-structured mode.
             prefix: Optional prefix for organizing multiple trees within the same
-                checkpoint directory. Useful for saving multiple model states.
+                checkpoint directory. Required when structured=True. Useful for saving
+                multiple model states or components (e.g., "model", "optimizer").
+            structured: If True, saves the checkpoint in structured mode which preserves
+                the PyTree structure (treedef) and requires a prefix. If False, uses
+                non-structured TensorStore mode saving only array leaves. Default: False.
+            dtype: Optional dtype to cast arrays to before saving. If None, preserves
+                original array dtypes.
+            extras: Optional dictionary of extra metadata to store in the checkpoint.
+                Merged with standard metadata (step, is_temporary).
 
         Note:
             - Uses AsyncCheckpointManager for non-blocking I/O
@@ -376,26 +431,34 @@ class Checkpointer:
             - Creates destination directory if it doesn't exist
             - Updates internal tracking of last save step and time
             - All processes must call this method (distributed operation)
+            - structured=True requires a prefix and uses different save path
 
         Examples:
             ```python
             # Simple checkpoint save
             checkpointer.save_checkpoint(
                 tree=model_state,
-                destination="step-1000",
+                destination="run-1000",
                 step=1000,
             )
 
-            # Save with mesh and callback
-            def on_complete():
-                print("Checkpoint saved!")
+            # Structured save with prefix
+            checkpointer.save_checkpoint(
+                tree=optimizer_state,
+                destination="run-1000",
+                prefix="optimizer",
+                structured=True,
+                step=1000,
+            )
 
+            # Save with mesh, dtype, and extras
             checkpointer.save_checkpoint(
                 tree=training_state,
-                destination=f"step-{current_step}",
+                destination=f"run-{current_step}",
                 mesh=my_mesh,
                 step=current_step,
-                commit_callback=on_complete,
+                dtype=jnp.bfloat16,
+                extras={"loss": float(loss), "learning_rate": 0.001},
             )
             ```
         """
@@ -474,12 +537,17 @@ class Checkpointer:
             shardings: Dictionary mapping array names to sharding specifications.
                 Used to restore arrays with specific shardings. If None, attempts
                 to restore original shardings from checkpoint metadata.
+                Only used in non-structured mode.
             partition_rules: Optional partition rules for automatic sharding inference.
                 Alternative to explicit shardings dictionary.
             dtype: Optional dtype to cast loaded arrays to. If None, preserves
                 original dtypes from the checkpoint.
             prefix: Optional prefix if the checkpoint contains multiple trees.
-                Must match the prefix used during save_checkpoint.
+                Must match the prefix used during save_checkpoint. Required when
+                structured=True.
+            structured: If True, loads the checkpoint in structured mode which restores
+                the full PyTree structure (treedef) and requires a prefix. If False, uses
+                non-structured TensorStore mode loading only array leaves. Default: False.
 
         Returns:
             A tuple of (tree, metadata) where:
@@ -489,12 +557,14 @@ class Checkpointer:
         Raises:
             FileNotFoundError: If no checkpoint is found at the specified path
                 or if discover_latest=True and no checkpoints exist.
+            ValueError: If structured=True but prefix is not provided.
 
         Note:
             - Automatically handles both local and cloud storage paths
             - Restores arrays with distributed shardings (no all-gather)
             - All processes must call this method (distributed operation)
             - Discovered checkpoints are sorted by timestamp then step number
+            - structured=True requires a prefix matching the one used during save
 
         Examples:
             ```python
@@ -505,14 +575,22 @@ class Checkpointer:
             # Load specific checkpoint
             state, _ = checkpointer.load_checkpoint(
                 mesh=my_mesh,
-                path="/checkpoints/my_model/step-1000",
+                path="/checkpoints/my_model/run-1000",
                 discover_latest=False,
             )
 
-            # Load with custom shardings
+            # Load structured checkpoint with prefix
+            state, _ = checkpointer.load_checkpoint(
+                mesh=my_mesh,
+                prefix="optimizer",
+                structured=True,
+            )
+
+            # Load with custom shardings (non-structured mode)
             state, _ = checkpointer.load_checkpoint(
                 mesh=my_mesh,
                 shardings=custom_shardings,
+                structured=False,
             )
             ```
         """
@@ -660,7 +738,7 @@ class Checkpointer:
         tree: PyTree,
         prefix: str,
         *,
-        step: int,
+        step: int | None = None,
         destination: str | None = None,
         mesh: Mesh = None,
         dtype: jnp.dtype | None = None,
@@ -675,7 +753,7 @@ class Checkpointer:
             tree: PyTree to save.
             prefix: Namespace/prefix (e.g., "tx", "model").
             step: Training step for metadata.json.
-            destination: Optional subdir under base_path. Defaults to f"step-{step}".
+            destination: Optional subdir under base_path. Defaults to f"run-{step}".
             mesh: Optional JAX Mesh for sharding context.
             dtype: Optional dtype cast for floating values before saving.
             extras: Optional extra metadata to store in checkpoint_metadata.json.
@@ -688,11 +766,17 @@ class Checkpointer:
         if not prefix or not isinstance(prefix, str):
             raise ValueError("A non-empty string prefix is required")
 
-        dest = destination or f"step-{int(step)}"
-        path = fsspec_utils.join_path(self.base_path, dest)
-        fsspec_utils.mkdirs(path)
+        path = destination or self.base_path
 
+        if step is not None:
+            dest = destination or f"run-{int(step)}"
+            path = fsspec_utils.join_path(self.base_path, str(dest))
+        fsspec_utils.mkdirs(path)
+        extras = extras or {}
+        if step is not None:
+            extras["step"] = int(step)
         # Use AsyncCheckpointManager.save_pytree (treedef-preserving)
+
         self._manager.save_pytree(
             pytree=tree,
             path=path,
@@ -701,11 +785,11 @@ class Checkpointer:
             do_all_gather=False,  # preserve sharding
             cpu_offload=False,
             dtype=dtype,
-            extras={**(extras or {}), "step": int(step)},
+            extras=extras,
             write_index=write_index,
         )
-
-        _write_checkpoint_metadata(path, step=int(step), is_temporary=temporary)
+        if step is not None:
+            _write_checkpoint_metadata(path, step=int(step), is_temporary=temporary)
 
         return path
 
@@ -716,41 +800,121 @@ class Checkpointer:
         prefix: str,
         path: str | None = None,
         discover_latest: bool = True,
+        discover_raise: bool = True,
         partition_rules: tp.Any = None,
         dtype: jnp.dtype | None = None,
+        load_treedef: bool = False,
+        callback: tp.Callable[[jax.Array, str], jax.Array] | None = None,
     ) -> tuple[PyTree, MetadataDict]:
-        """
-        Load a treedef-preserving PyTree saved under a specific prefix.
+        """Load a treedef-preserving PyTree saved under a specific prefix.
+
+        This method loads checkpoints saved in structured mode using save_pytree(),
+        which preserves the full PyTree structure definition (treedef).
 
         Args:
-            mesh: JAX Mesh for array sharding on load.
+            mesh: JAX Mesh for array sharding on load. Required for properly
+                restoring sharded arrays across devices.
             prefix: Namespace/prefix (e.g., "tx", "model") used at save time.
-            path: Optional exact checkpoint directory; if None, uses base_path.
-            discover_latest: If True, auto-pick latest checkpoint under base_path/path.
-            partition_rules: Optional partition rules for sharding.
-            dtype: Optional dtype cast after loading.
+                Must match the prefix used when saving the checkpoint.
+            path: Optional exact checkpoint directory to load from. If None,
+                uses base_path and discovers the latest checkpoint if
+                discover_latest=True.
+            discover_latest: If True, automatically finds and loads the most recent
+                checkpoint under the specified path based on metadata timestamps.
+                If False, loads from the exact path specified. Default: True.
+            discover_raise: If True, raises FileNotFoundError when no checkpoint
+                is found during discovery. If False, returns None silently when
+                no checkpoint exists. Only used when discover_latest=True. Default: True.
+            partition_rules: Optional partition rules for automatic sharding inference.
+                Alternative to explicit shardings.
+            dtype: Optional dtype to cast loaded arrays to. If None, preserves
+                original dtypes from the checkpoint.
+            load_treedef: If True, uses load_pytree() which restores the full
+                PyTree structure definition. If False, uses load() which restores
+                only the array values. Default: False.
+            callback: Optional callback function to process each loaded array.
+                Receives (array, key_path) and should return the processed array.
+                Useful for custom transformations during loading.
 
         Returns:
-            (pytree, extras_metadata)
+            A tuple of (pytree, extras_metadata) where:
+                - pytree: Restored PyTree with the same structure as saved
+                - extras_metadata: Dictionary containing checkpoint metadata from save
+
+        Raises:
+            FileNotFoundError: If no checkpoint is found and discover_raise=True.
+
+        Examples:
+            ```python
+            # Load latest checkpoint for a specific prefix
+            optimizer_state, metadata = checkpointer.load_pytree(
+                mesh=my_mesh,
+                prefix="optimizer",
+            )
+
+            # Load specific checkpoint without discovery
+            model, _ = checkpointer.load_pytree(
+                mesh=my_mesh,
+                prefix="model",
+                path="/checkpoints/run-1000",
+                discover_latest=False,
+            )
+
+            # Load with callback for custom processing
+            def convert_to_fp16(arr, key):
+                if arr.dtype == jnp.float32:
+                    return arr.astype(jnp.float16)
+                return arr
+
+            state, _ = checkpointer.load_pytree(
+                mesh=my_mesh,
+                prefix="model",
+                callback=convert_to_fp16,
+            )
+
+            # Silently handle missing checkpoint
+            state, metadata = checkpointer.load_pytree(
+                mesh=my_mesh,
+                prefix="tx",
+                discover_raise=False,
+            )
+            if state is None:
+                print("No checkpoint found, using fresh state")
+            ```
         """
         root = path or self.base_path
         if discover_latest:
             discovered = find_latest_checkpoint(root)
-            if discovered is None:
+            if discovered is None and discover_raise:
                 raise FileNotFoundError(f"No checkpoint found under {root}")
-            root = discovered
+            if discovered is not None:
+                root = discovered
+        if load_treedef:
+            pytree, extras = self._manager.load_pytree(
+                path=self._manager.safe_loadpath(root),
+                mesh=mesh,
+                prefix=prefix,
+                partition_rules=partition_rules,
+                dtype=dtype,
+            )
+            return pytree, extras
+        else:
+            pytree, extras = self._manager.load(
+                path=self._manager.safe_loadpath(root),
+                mesh=mesh,
+                prefix=prefix,
+                partition_rules=partition_rules,
+                dtype=dtype,
+                callback=callback,
+            )
+            return pytree, extras
 
-        pytree, extras = self._manager.load_pytree(
-            path=self._manager.safe_loadpath(root),
-            mesh=mesh,
-            prefix=prefix,
-            partition_rules=partition_rules,
-            dtype=dtype,
-        )
-        return pytree, extras
 
-
-def _write_checkpoint_metadata(checkpoint_path: str, step: int, is_temporary: bool) -> None:
+def _write_checkpoint_metadata(
+    checkpoint_path: str,
+    step: int,
+    is_temporary: bool,
+) -> None:
     """Save checkpoint metadata to a JSON file.
 
     Creates a metadata.json file in the checkpoint directory containing step number,
@@ -841,11 +1005,11 @@ def find_latest_checkpoint(base_path: str) -> str | None:
         ```python
         # Local filesystem
         latest = find_latest_checkpoint("/checkpoints/my_model")
-        # Returns: "/checkpoints/my_model/step-5000"
+        # Returns: "/checkpoints/my_model/run-5000"
 
         # Cloud storage
         latest = find_latest_checkpoint("gs://bucket/checkpoints")
-        # Returns: "gs://bucket/checkpoints/step-10000"
+        # Returns: "gs://bucket/checkpoints/run-10000"
 
         # No checkpoints found
         latest = find_latest_checkpoint("/empty/dir")
@@ -865,7 +1029,7 @@ def find_latest_checkpoint(base_path: str) -> str | None:
 
     ckpts = [p for p in candidates if contains_checkpoint(p)]
     if not ckpts:
-        logger.warning(f"No checkpoints found under {base_path}")
+        logger.debug(f"No checkpoints found under {base_path}")
         return None
 
     def sort_key(path: str):
@@ -875,7 +1039,6 @@ def find_latest_checkpoint(base_path: str) -> str | None:
         return (ts, step)
 
     best = max(ckpts, key=sort_key)
-    # If base_path used a scheme, re-attach it
     scheme = fsspec.core.split_protocol(base_path)[0] or ""
     if scheme:
         return f"{scheme}://{best}"
