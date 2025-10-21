@@ -100,18 +100,6 @@ def _structure_path(path: ePathLike | str, prefix: str | None) -> ePath:  # type
     return ePath(path) / name
 
 
-def _is_array_like(x):
-    """Check if an object is array-like (has shape and dtype attributes).
-
-    Args:
-        x: Object to check.
-
-    Returns:
-        bool: True if object has both shape and dtype attributes.
-    """
-    return hasattr(x, "shape") and hasattr(x, "dtype")
-
-
 def _is_none(x):
     """Check if a value is None.
 
@@ -446,7 +434,7 @@ class AsyncCheckpointManager:
             tree = jax.tree_util.tree_map(
                 lambda x: _to_host(x, float_dtype, mesh, cpu_offload),
                 tree,
-                is_leaf=lambda x: isinstance(x, jax.Array | np.generic | float | int),
+                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),  # noqa
             )
         elif do_all_gather and self.use_tensorstore and self.verbose:
             logger.warning("Ignoring do_all_gather for TensorStore backend to preserve sharding (TP+FSDP).")
@@ -967,14 +955,17 @@ class AsyncCheckpointManager:
             pytree = jax.tree_util.tree_map(
                 lambda x: (_is_array_like(x) and _to_host(x, use_dtype, mesh, cpu_offload)) or x,
                 pytree,
-                is_leaf=lambda x: isinstance(x, jax.Array | np.generic | float | int),
+                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),  # noqa
             )
 
-        treedef = jax.tree_util.tree_structure(pytree)
-        leaves = jax.tree_util.tree_leaves(pytree, is_leaf=_is_none)
+        leaves, treedef = jax.tree_util.tree_flatten(pytree, is_leaf=_is_none)
 
         leaf_keys_tree = leaf_key_paths(pytree, prefix=prefix, is_leaf=_is_none)
         leaf_keys_full: list[str] = jax.tree_util.tree_leaves(leaf_keys_tree, is_leaf=_is_none)
+        assert len(leaf_keys_full) == len(leaves), (
+            f"Mismatch between leaf_keys ({len(leaf_keys_full)}) and leaves ({len(leaves)}). "
+            "Ensure treedef and leaves use the same is_leaf and no leaves are dropped."
+        )
 
         arr_mask = [_is_array_like(x) for x in leaves]
         array_keys = [k for k, m in zip(leaf_keys_full, arr_mask, strict=False) if m]
@@ -1015,6 +1006,11 @@ class AsyncCheckpointManager:
         key_to_rel = dict(zip(keys_from_index, relpaths_from_index, strict=False))
         array_relpaths = [key_to_rel[k] for k in array_keys]
 
+        if sum(arr_mask) != len(array_relpaths):
+            raise ValueError(
+                f"Structure mismatch: arr_mask expects {sum(arr_mask)} arrays, but index provided {len(array_relpaths)}."
+            )
+
         structure = {
             "format": "pytree-structure",
             "version": __version__,
@@ -1045,6 +1041,8 @@ class AsyncCheckpointManager:
         shardings: dict[str, tp.Callable] | None = None,
         partition_rules: tp.Sequence[tuple[str, PartitionSpec]] | None = None,
         dtype: jnp.dtype | None = None,
+        template: PyTree | None = None,
+        strict_shapes: bool = True,
     ) -> tuple[PyTree, dict]:
         """Load a PyTree saved by save_pytree with the same prefix.
 
@@ -1085,6 +1083,12 @@ class AsyncCheckpointManager:
         treedef = _treedef_from_b64(struct["treedef_b64"])
         leaf_keys_full: list[str] = struct["leaf_keys_full"]
         arr_mask: list[bool] = struct["arr_mask"]
+        if len(arr_mask) != treedef.num_leaves:
+            raise ValueError(
+                f"Structure/treedef mismatch: arr_mask has {len(arr_mask)} leaves, "
+                f"treedef expects {treedef.num_leaves}. The structure file may be stale "
+                "or saved with a different JAX PyTree definition."
+            )
         array_keys: list[str] = struct["array_keys"]
         metadata = struct.get("extras", {})
 
@@ -1124,20 +1128,63 @@ class AsyncCheckpointManager:
 
         array_leaves = self.global_manager.deserialize_with_paths(shardings=apply_shardings, paths=abs_paths)
         self.global_manager.wait_until_finished()
+        expected_arrays = sum(arr_mask)
+        if len(array_leaves) != expected_arrays:
+            raise ValueError(
+                f"Loaded {len(array_leaves)} arrays but structure expects {expected_arrays}. "
+                "Index or structure may be stale."
+            )
         if dtype is not None:
             array_leaves = [jnp.asarray(x, dtype=dtype) for x in array_leaves]
 
-        leaves_full = [None] * len(leaf_keys_full)
-        it = iter(array_leaves)
-        nonarray_payload: dict[str, str] = struct.get("nonarray_payload", {})
-        for i, is_arr in enumerate(arr_mask):
-            if is_arr:
-                leaves_full[i] = next(it)
-            else:
-                payload_b64 = nonarray_payload.get(str(i))
-                if payload_b64 is None:
-                    raise ValueError(f"Missing non-array payload for leaf index {i}")
-                leaves_full[i] = pickle.loads(base64.b64decode(payload_b64))
+        if template is None:
+            leaves_full = [None] * len(leaf_keys_full)
+            it = iter(array_leaves)
+            nonarray_payload: dict[str, str] = struct.get("nonarray_payload", {})
+            for i, is_arr in enumerate(arr_mask):
+                if is_arr:
+                    leaves_full[i] = next(it)
+                else:
+                    payload_b64 = nonarray_payload.get(str(i))
+                    if payload_b64 is None:
+                        raise ValueError(f"Missing non-array payload for leaf index {i}")
+                    leaves_full[i] = pickle.loads(base64.b64decode(payload_b64))
+            pytree = jax.tree_util.tree_unflatten(treedef, leaves_full)
+            return pytree, metadata
 
-        pytree = jax.tree_util.tree_unflatten(treedef, leaves_full)
+        saved_arrays_by_key = {k: v for k, v in zip(array_keys, array_leaves, strict=False)}
+
+        tpl_leaves, tpl_treedef = jax.tree_util.tree_flatten(template, is_leaf=_is_none)
+        tpl_leaf_keys_tree = leaf_key_paths(template, prefix=prefix, is_leaf=_is_none)
+        tpl_leaf_keys_full: list[str] = jax.tree_util.tree_leaves(tpl_leaf_keys_tree, is_leaf=_is_none)
+        tpl_arr_mask = [_is_array_like(x) for x in tpl_leaves]
+
+        def _coerce_or_fallback(loaded, expected, key):
+            if not (_is_array_like(loaded) and _is_array_like(expected)):
+                return loaded
+            if loaded.shape == expected.shape:
+                return loaded
+            if not strict_shapes and (loaded.ndim == expected.ndim + 1) and (loaded.shape[1:] == expected.shape):
+                return loaded[0]
+            if not strict_shapes and np.prod(loaded.shape) == np.prod(expected.shape):
+                return jnp.reshape(loaded, expected.shape)
+            if strict_shapes:
+                raise ValueError(f"Array shape mismatch for key '{key}': got {loaded.shape}, expected {expected.shape}.")
+            return expected
+
+        tpl_leaves_full = [None] * len(tpl_leaf_keys_full)
+        for i, key in enumerate(tpl_leaf_keys_full):
+            if tpl_arr_mask[i]:
+                expected = tpl_leaves[i]
+                loaded = saved_arrays_by_key.get(key)
+                if loaded is None:
+                    if strict_shapes:
+                        raise KeyError(f"Missing array for key '{key}' in checkpoint.")
+                    tpl_leaves_full[i] = expected
+                else:
+                    tpl_leaves_full[i] = _coerce_or_fallback(loaded, expected, key)
+            else:
+                tpl_leaves_full[i] = tpl_leaves[i]
+
+        pytree = jax.tree_util.tree_unflatten(tpl_treedef, tpl_leaves_full)
         return pytree, metadata

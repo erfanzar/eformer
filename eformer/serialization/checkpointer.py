@@ -519,6 +519,8 @@ class Checkpointer:
         dtype: tp.Any = None,
         prefix: str | None = None,
         structured: bool = False,
+        template: PyTree | None = None,
+        strict_shapes: bool = True,
     ) -> tuple[PyTree, MetadataDict]:
         """Load a checkpoint from disk with automatic discovery.
 
@@ -612,6 +614,8 @@ class Checkpointer:
                 prefix=prefix,
                 partition_rules=partition_rules,
                 dtype=dtype,
+                template=template,
+                strict_shapes=strict_shapes,
             )
         else:
             tree, meta = self._manager.load(
@@ -805,6 +809,8 @@ class Checkpointer:
         dtype: jnp.dtype | None = None,
         load_treedef: bool = False,
         callback: tp.Callable[[jax.Array, str], jax.Array] | None = None,
+        template: PyTree | None = None,
+        strict_shapes: bool = True,
     ) -> tuple[PyTree, MetadataDict]:
         """Load a treedef-preserving PyTree saved under a specific prefix.
 
@@ -896,8 +902,10 @@ class Checkpointer:
                 prefix=prefix,
                 partition_rules=partition_rules,
                 dtype=dtype,
+                strict_shapes=strict_shapes,
+                template=template,
             )
-            return pytree, extras
+
         else:
             pytree, extras = self._manager.load(
                 path=self._manager.safe_loadpath(root),
@@ -907,7 +915,11 @@ class Checkpointer:
                 dtype=dtype,
                 callback=callback,
             )
-            return pytree, extras
+        metadata = _read_checkpoint_metadata(str(self._manager.safe_loadpath(root)))
+        for k, v in metadata.items():
+            if k not in extras.keys():
+                extras[k] = v
+        return pytree, extras
 
 
 def _write_checkpoint_metadata(
@@ -942,7 +954,10 @@ def _write_checkpoint_metadata(
             json.dump(meta, out)
 
 
-def _read_checkpoint_metadata(checkpoint_path: str, fs: AbstractFileSystem | None = None) -> MetadataDict:
+def _read_checkpoint_metadata(
+    checkpoint_path: str,
+    fs: AbstractFileSystem | None = None,
+) -> MetadataDict:
     """Load checkpoint metadata from a JSON file.
 
     Reads the metadata.json file from a checkpoint directory and returns the

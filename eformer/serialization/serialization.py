@@ -21,7 +21,6 @@ from typing import Any
 
 import jax
 import numpy as np
-from jax import numpy as jnp
 from jax import tree_util as jtu
 from jax._src.tree_util import DictKey, FlattenedIndexKey, GetAttrKey, SequenceKey
 from jax.experimental.array_serialization import serialization as array_ser
@@ -197,14 +196,7 @@ def tree_serialize_leaves(
     paired_leaves = jax.tree.leaves(zipped)
     paths = [p.path for p in paired_leaves]
     leaves = [p.leaf for p in paired_leaves]
-
-    def _ensure_is_array(x):
-        if isinstance(x, int | float | bool | complex):
-            return jnp.array(x)
-        else:
-            return x
-
-    arrays = [_ensure_is_array(x) for x in leaves]
+    arrays = leaves
 
     array_info = []
     arrays_filtered = []
