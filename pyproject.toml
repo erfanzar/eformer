@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "eformer"
-version = "0.0.80"
+version = "0.0.81"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 description = "(EasyDel Former) is a utility library designed to simplify and enhance the development in JAX"
 readme = "README.md"
@@ -37,9 +37,9 @@ dependencies = [
 	"google-cloud-storage>=3.3.0",
 	"tensorstore>=0.1.76",
 	"braceexpand>=0.1.7",
-	"chex>=0.1.89",
+	"chex>=0.1.91",
 	"jaxtyping>=0.3.2",
-	"fsspec>=2025.9.0",
+	"fsspec[http]>=2024.2,<2026",
 ]
 
 [project.urls]

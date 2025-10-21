@@ -915,10 +915,13 @@ class Checkpointer:
                 dtype=dtype,
                 callback=callback,
             )
-        metadata = _read_checkpoint_metadata(str(self._manager.safe_loadpath(root)))
-        for k, v in metadata.items():
-            if k not in extras.keys():
-                extras[k] = v
+        try:
+            metadata = _read_checkpoint_metadata(str(self._manager.safe_loadpath(root)))
+            for k, v in metadata.items():
+                if k not in extras.keys():
+                    extras[k] = v
+        except Exception:
+            ...
         return pytree, extras
 
 
