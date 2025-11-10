@@ -356,6 +356,18 @@ def create_mesh(
         >>> with mesh:
         ...     sharded_fn = pjit(fn, in_shardings=..., out_shardings=...)
     """
+    if hasattr(jax, "make_mesh"):
+        total_devices = jax.device_count(backend)
+        process_count = jax.process_count()
+        axis_dims = np.arange(total_devices).reshape(axis_dims).shape
+
+        if dcn_mesh_dims is not None:
+            dcn_mesh_dims = np.arange(process_count).reshape(dcn_mesh_dims).shape
+            _new = ()
+            for a, d in zip(tuple(axis_dims), tuple(dcn_mesh_dims), strict=False):
+                _new = (*_new, a * d)
+            axis_dims = _new
+        return jax.make_mesh(axis_shapes=axis_dims, axis_names=axis_names)
     return _cached_mesh(
         axis_dims=axis_dims,
         axis_names=axis_names,

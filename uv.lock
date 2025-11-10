@@ -290,7 +290,7 @@ wheels = [
 
 [[package]]
 name = "eformer"
-version = "0.0.81"
+version = "0.0.82"
 source = { editable = "." }
 dependencies = [
     { name = "braceexpand" },
