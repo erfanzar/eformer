@@ -21,16 +21,32 @@ import pytest
 
 from eformer.optimizers import (
     AdafactorConfig,
+    AdafactorOptimizer,
     AdamWConfig,
+    AdamWOptimizer,
+    ConstantSchedulerBuilder,
+    CosineSchedulerBuilder,
+    LinearSchedulerBuilder,
     LionConfig,
+    LionOptimizer,
     MarsConfig,
+    MarsOptimizer,
     MuonConfig,
+    MuonOptimizer,
+    OptimizerBuilder,
     OptimizerFactory,
+    QuadOptimizer,
     RMSPropConfig,
+    RMSPropOptimizer,
+    SchedulerBuilder,
     SchedulerConfig,
     SchedulerFactory,
+    SkewOptimizer,
     WhiteKronConfig,
+    register_optimizer,
+    register_scheduler,
 )
+from eformer.optimizers._base import _OPTIMIZER_BUILDER_REGISTRY, _SCHEDULER_BUILDER_REGISTRY
 
 
 class TestSerializationMixin:
@@ -234,23 +250,15 @@ class TestOptimizerFactory:
     """Test OptimizerFactory functionality."""
 
     def test_optimizer_registry(self):
-        assert "adafactor" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert "adamw" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert "lion" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert "rmsprop" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert "skew" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert "quad" in OptimizerFactory._OPTIMIZER_REGISTRY
-
-    def test_register_optimizer(self):
-        class DummyOptimizer:
-            pass
-
-        class DummyConfig:
-            pass
-
-        OptimizerFactory.register_optimizer("dummy", DummyOptimizer, DummyConfig)
-        assert "dummy" in OptimizerFactory._OPTIMIZER_REGISTRY
-        assert OptimizerFactory._OPTIMIZER_REGISTRY["dummy"] == (DummyOptimizer, DummyConfig)
+        """Test that all expected optimizers are registered in the builder registry."""
+        assert "adafactor" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "adamw" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "lion" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "rmsprop" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "muon" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "mars" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "skew" in _OPTIMIZER_BUILDER_REGISTRY
+        assert "quad" in _OPTIMIZER_BUILDER_REGISTRY
 
     def test_unsupported_optimizer_type(self):
         scheduler_config = SchedulerConfig()
@@ -278,7 +286,7 @@ class TestOptimizerFactory:
         scheduler_config = SchedulerConfig(learning_rate=0.001)
         optimizer_config = AdamWConfig()
 
-        optimizer, scheduler = OptimizerFactory.create("adamw", scheduler_config, optimizer_config, weight_decay=0.01)
+        optimizer, _scheduler = OptimizerFactory.create("adamw", scheduler_config, optimizer_config, weight_decay=0.01)
 
         assert isinstance(optimizer, optax.GradientTransformation)
 
@@ -286,7 +294,7 @@ class TestOptimizerFactory:
         scheduler_config = SchedulerConfig(learning_rate=0.001)
         optimizer_config = AdamWConfig()
 
-        optimizer, scheduler = OptimizerFactory.create("adamw", scheduler_config, optimizer_config, clip_grad=1.0)
+        optimizer, _scheduler = OptimizerFactory.create("adamw", scheduler_config, optimizer_config, clip_grad=1.0)
 
         assert isinstance(optimizer, optax.GradientTransformation)
 
@@ -294,8 +302,11 @@ class TestOptimizerFactory:
         scheduler_config = SchedulerConfig(learning_rate=0.001)
         optimizer_config = AdamWConfig()
 
-        optimizer, scheduler = OptimizerFactory.create(
-            "adamw", scheduler_config, optimizer_config, gradient_accumulation_steps=4
+        optimizer, _scheduler = OptimizerFactory.create(
+            "adamw",
+            scheduler_config,
+            optimizer_config,
+            gradient_accumulation_steps=4,
         )
 
         assert isinstance(optimizer, optax.MultiSteps)
@@ -356,7 +367,7 @@ class TestOptimizerFactory:
         assert "b2" in template
 
     def test_generate_template_unknown_optimizer(self):
-        with pytest.raises(ValueError, match="Unknown optimizer type"):
+        with pytest.raises(ValueError, match="Unsupported optimizer"):
             OptimizerFactory.generate_template("unknown")
 
     def test_serialize_config_dict(self):
@@ -391,7 +402,7 @@ class TestOptimizerFactory:
 
     def test_deserialize_config_unknown_optimizer(self):
         data = {"b1": 0.95}
-        with pytest.raises(ValueError, match="Unknown optimizer type"):
+        with pytest.raises(ValueError, match="Unsupported optimizer"):
             OptimizerFactory.deserialize_config("unknown", data)
 
     def test_deserialize_config_invalid_data_type_json(self):
@@ -405,6 +416,306 @@ class TestOptimizerFactory:
     def test_deserialize_config_invalid_format(self):
         with pytest.raises(ValueError, match="Unsupported format"):
             OptimizerFactory.deserialize_config("adamw", {}, format="xml")
+
+
+class TestBuilderPattern:
+    """Test the builder pattern and registration system."""
+
+    def test_optimizer_builder_abstract_base(self):
+        """Test that OptimizerBuilder is abstract and requires build method."""
+        from abc import ABC
+
+        assert issubclass(OptimizerBuilder, ABC)
+
+    def test_scheduler_builder_abstract_base(self):
+        """Test that SchedulerBuilder is abstract and requires build method."""
+        from abc import ABC
+
+        assert issubclass(SchedulerBuilder, ABC)
+
+    def test_adamw_builder_instantiation(self):
+        """Test AdamWOptimizer builder can be instantiated with config."""
+        config = AdamWConfig(b1=0.95, b2=0.998)
+        builder = AdamWOptimizer(config=config)
+        assert builder.config == config
+        assert builder.config.b1 == 0.95
+
+    def test_adamw_builder_build(self):
+        """Test AdamWOptimizer builder builds correct transformation."""
+        config = AdamWConfig(b1=0.95, b2=0.998, eps=1e-7)
+        builder = AdamWOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+        # Test that it can initialize and update
+        params = {"w": jnp.array([1.0, 2.0, 3.0])}
+        state = tx.init(params)
+        grads = {"w": jnp.array([0.1, 0.2, 0.3])}
+        updates, _new_state = tx.update(grads, state, params)
+        assert "w" in updates
+
+    def test_lion_builder_build(self):
+        """Test LionOptimizer builder builds correct transformation."""
+        config = LionConfig(b1=0.9, b2=0.99)
+        builder = LionOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_adafactor_builder_build(self):
+        """Test AdafactorOptimizer builder builds correct transformation."""
+        config = AdafactorConfig(min_dim_size_to_factor=128, decay_rate=0.8)
+        builder = AdafactorOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_rmsprop_builder_build(self):
+        """Test RMSPropOptimizer builder builds correct transformation."""
+        config = RMSPropConfig(decay=0.9, eps=1e-8)
+        builder = RMSPropOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_muon_builder_build(self):
+        """Test MuonOptimizer builder builds correct transformation."""
+        config = MuonConfig(beta=0.95, ns_steps=5)
+        builder = MuonOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_mars_builder_build(self):
+        """Test MarsOptimizer builder builds correct transformation."""
+        config = MarsConfig(beta1=0.95, beta2=0.99, gamma=0.025)
+        builder = MarsOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_skew_builder_build(self):
+        """Test SkewOptimizer builder builds correct transformation."""
+        config = WhiteKronConfig(b1=0.9, preconditioner_lr=0.7, block_size=128)
+        builder = SkewOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_quad_builder_build(self):
+        """Test QuadOptimizer builder builds correct transformation."""
+        config = WhiteKronConfig(b1=0.9, preconditioner_lr=0.7, max_size_dense=8192)
+        builder = QuadOptimizer(config=config)
+        scheduler = optax.constant_schedule(0.001)
+
+        tx = builder.build(scheduler)
+        assert isinstance(tx, optax.GradientTransformation)
+
+    def test_constant_scheduler_builder_build(self):
+        """Test ConstantSchedulerBuilder builds correct schedule."""
+        config = SchedulerConfig(learning_rate=0.001)
+        builder = ConstantSchedulerBuilder(config=config)
+
+        schedule = builder.build()
+        assert schedule(0) == 0.001
+        assert schedule(1000) == 0.001
+
+    def test_linear_scheduler_builder_build(self):
+        """Test LinearSchedulerBuilder builds correct schedule."""
+        config = SchedulerConfig(scheduler_type="linear", learning_rate=0.01, learning_rate_end=0.001, steps=1000)
+        builder = LinearSchedulerBuilder(config=config)
+
+        schedule = builder.build()
+        assert schedule(0) == pytest.approx(0.01, rel=1e-3)
+        assert schedule(1000) == pytest.approx(0.001, rel=1e-3)
+
+    def test_cosine_scheduler_builder_build(self):
+        """Test CosineSchedulerBuilder builds correct schedule."""
+        config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.01, steps=1000)
+        builder = CosineSchedulerBuilder(config=config)
+
+        schedule = builder.build()
+        assert schedule(0) == 0.01
+        assert schedule(1000) < 0.01
+
+    def test_builder_validate_hook_called(self):
+        """Test that validate() hook is called during factory creation."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class TestConfig:
+            value: int = 10
+
+        @register_optimizer("test_validate")
+        @dataclasses.dataclass
+        class TestOptimizer(OptimizerBuilder):
+            config: TestConfig
+            validate_called: bool = dataclasses.field(default=False, init=False)
+
+            def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                return optax.sgd(learning_rate=scheduler)
+
+            def validate(self) -> None:
+                self.validate_called = True
+                if self.config.value < 0:
+                    raise ValueError("value must be non-negative")
+
+        # Create using factory
+        scheduler_config = SchedulerConfig(learning_rate=0.001)
+        config = TestConfig(value=5)
+
+        # Factory should call validate
+        tx, _ = OptimizerFactory.create("test_validate", scheduler_config, config)
+        assert isinstance(tx, optax.GradientTransformation)
+
+        # Clean up registry
+        del _OPTIMIZER_BUILDER_REGISTRY["test_validate"]
+
+
+class TestDecoratorRegistration:
+    """Test the decorator-based registration system."""
+
+    def test_register_optimizer_decorator(self):
+        """Test @register_optimizer decorator registers a builder."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class DummyConfig:
+            lr: float = 0.001
+
+        # Store original registry size
+        original_size = len(_OPTIMIZER_BUILDER_REGISTRY)
+
+        @register_optimizer("dummy_test")
+        @dataclasses.dataclass
+        class DummyOptimizer(OptimizerBuilder):
+            config: DummyConfig
+
+            def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                return optax.sgd(learning_rate=scheduler)
+
+        # Check registration
+        assert "dummy_test" in _OPTIMIZER_BUILDER_REGISTRY
+        assert _OPTIMIZER_BUILDER_REGISTRY["dummy_test"] == DummyOptimizer
+        assert len(_OPTIMIZER_BUILDER_REGISTRY) == original_size + 1
+
+        # Clean up
+        del _OPTIMIZER_BUILDER_REGISTRY["dummy_test"]
+
+    def test_register_optimizer_duplicate_raises_error(self):
+        """Test that registering duplicate optimizer name raises ValueError."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Config1:
+            pass
+
+        @register_optimizer("dup_test")
+        @dataclasses.dataclass
+        class Optimizer1(OptimizerBuilder):
+            config: Config1
+
+            def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                return optax.sgd(learning_rate=scheduler)
+
+        # Try to register again with same name
+        with pytest.raises(ValueError, match="already registered"):
+
+            @register_optimizer("dup_test")
+            @dataclasses.dataclass
+            class Optimizer2(OptimizerBuilder):
+                config: Config1
+
+                def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                    return optax.sgd(learning_rate=scheduler)
+
+        # Clean up
+        del _OPTIMIZER_BUILDER_REGISTRY["dup_test"]
+
+    def test_register_scheduler_decorator(self):
+        """Test @register_scheduler decorator registers a builder."""
+        import dataclasses
+
+        # Store original registry size
+        original_size = len(_SCHEDULER_BUILDER_REGISTRY)
+
+        @register_scheduler("dummy_scheduler")
+        @dataclasses.dataclass
+        class DummyScheduler(SchedulerBuilder):
+            config: SchedulerConfig
+
+            def build(self) -> optax.Schedule:
+                return optax.constant_schedule(self.config.learning_rate)
+
+        # Check registration
+        assert "dummy_scheduler" in _SCHEDULER_BUILDER_REGISTRY
+        assert _SCHEDULER_BUILDER_REGISTRY["dummy_scheduler"] == DummyScheduler
+        assert len(_SCHEDULER_BUILDER_REGISTRY) == original_size + 1
+
+        # Clean up
+        del _SCHEDULER_BUILDER_REGISTRY["dummy_scheduler"]
+
+    def test_register_scheduler_duplicate_raises_error(self):
+        """Test that registering duplicate scheduler name raises ValueError."""
+        import dataclasses
+
+        @register_scheduler("dup_sched_test")
+        @dataclasses.dataclass
+        class Scheduler1(SchedulerBuilder):
+            config: SchedulerConfig
+
+            def build(self) -> optax.Schedule:
+                return optax.constant_schedule(0.001)
+
+        # Try to register again with same name
+        with pytest.raises(ValueError, match="already registered"):
+
+            @register_scheduler("dup_sched_test")
+            @dataclasses.dataclass
+            class Scheduler2(SchedulerBuilder):
+                config: SchedulerConfig
+
+                def build(self) -> optax.Schedule:
+                    return optax.constant_schedule(0.002)
+
+        # Clean up
+        del _SCHEDULER_BUILDER_REGISTRY["dup_sched_test"]
+
+    def test_all_builtin_optimizers_registered(self):
+        """Test that all built-in optimizers are registered."""
+        expected_optimizers = ["adamw", "adafactor", "lion", "rmsprop", "muon"]
+        for name in expected_optimizers:
+            assert name in _OPTIMIZER_BUILDER_REGISTRY, f"Optimizer '{name}' not registered"
+
+    def test_all_custom_optimizers_registered(self):
+        """Test that all custom optimizers are registered."""
+        expected_custom = ["mars", "skew", "quad"]
+        for name in expected_custom:
+            assert name in _OPTIMIZER_BUILDER_REGISTRY, f"Custom optimizer '{name}' not registered"
+
+    def test_all_schedulers_registered(self):
+        """Test that all schedulers are registered."""
+        expected_schedulers = ["constant", "linear", "cosine"]
+        for name in expected_schedulers:
+            assert name in _SCHEDULER_BUILDER_REGISTRY, f"Scheduler '{name}' not registered"
+
+    def test_builder_registry_contains_correct_types(self):
+        """Test that registry contains OptimizerBuilder subclasses."""
+        for name, builder_cls in _OPTIMIZER_BUILDER_REGISTRY.items():
+            assert issubclass(builder_cls, OptimizerBuilder), f"'{name}' is not an OptimizerBuilder subclass"
+
+    def test_scheduler_registry_contains_correct_types(self):
+        """Test that registry contains SchedulerBuilder subclasses."""
+        for name, builder_cls in _SCHEDULER_BUILDER_REGISTRY.items():
+            assert issubclass(builder_cls, SchedulerBuilder), f"'{name}' is not a SchedulerBuilder subclass"
 
 
 class TestOptimizerIntegration:
@@ -472,9 +783,9 @@ class TestOptimizerIntegration:
         lr_mid = scheduler(500)
         lr_end = scheduler(1000)
 
-        assert lr_start == 0.01
+        assert lr_start == pytest.approx(0.01, rel=1e-3)
         assert lr_mid == pytest.approx(0.0055, rel=1e-3)
-        assert lr_end == 0.001
+        assert lr_end == pytest.approx(0.001, rel=1e-3)
 
     def test_skew_step_update(self):
         key = jax.random.PRNGKey(42)
@@ -519,9 +830,9 @@ class TestOptimizerIntegration:
 
         params = {
             "dense": jax.random.normal(keys[0], (10, 20)),  # 2D matrix
-            "bias": jax.random.normal(keys[1], (20,)),      # 1D vector
-            "small": jax.random.normal(keys[2], (3, 3)),    # Small matrix
-            "large": jax.random.normal(keys[3], (50, 100)), # Larger matrix
+            "bias": jax.random.normal(keys[1], (20,)),  # 1D vector
+            "small": jax.random.normal(keys[2], (3, 3)),  # Small matrix
+            "large": jax.random.normal(keys[3], (50, 100)),  # Larger matrix
         }
         grads = jax.tree.map(lambda x: jax.random.normal(jax.random.PRNGKey(123), x.shape), params)
 
@@ -543,4 +854,3 @@ class TestOptimizerIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__])
-

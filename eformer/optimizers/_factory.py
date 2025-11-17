@@ -22,6 +22,12 @@ from dataclasses import fields
 import jax
 import optax
 
+# Import builders to trigger registration (side-effect import)
+# Import custom optimizers to trigger registration (side-effect import)
+from . import _builders, _tx  # noqa
+
+# Import base classes and registries
+from ._base import _OPTIMIZER_BUILDER_REGISTRY
 from ._config import (
     AdafactorConfig,
     AdamWConfig,
@@ -35,8 +41,19 @@ from ._config import (
     SoapConfig,
     WhiteKronConfig,
 )
-from ._custom import mars, white_kron
 from ._tx import optax_add_scheduled_weight_decay
+
+TxConfigs = (
+    AdafactorConfig
+    | AdamWConfig
+    | KronConfig
+    | LionConfig
+    | MarsConfig
+    | MuonConfig
+    | RMSPropConfig
+    | SoapConfig
+    | WhiteKronConfig
+)
 
 
 class SchedulerFactory:
@@ -146,59 +163,53 @@ class OptimizerFactory:
     Factory class for creating optimizers with validated configurations.
 
     This class provides methods to create optimizers based on a configuration object.
-    It supports multiple optimizer types, including Adafactor, AdamW, Lion, and RMSProp.
-
-    Attributes:
-        _OPTIMIZER_REGISTRY (Dict[str, Tuple[Type, Type]]): Registry of supported optimizers and their configurations.
+    All optimizers are registered using the @register_optimizer decorator pattern.
 
     Methods:
-        register_optimizer: Registers a new optimizer type.
         create: Creates an optimizer with validated configuration.
-        _convert_dtypes: Converts string dtype representations to JAX dtypes.
-        _validate_kwargs: Validates additional parameters for the optimizer.
-        _build_optimizer: Constructs the final optimizer chain.
         generate_template: Generates a configuration template for the specified optimizer.
         serialize_config: Serializes configuration to different formats.
         deserialize_config: Deserializes configuration from different formats.
+
+    Private Methods:
+        _get_config_class: Gets the configuration class for an optimizer type.
+        _convert_dtypes: Converts string dtype representations to JAX dtypes.
+        _validate_kwargs: Validates additional parameters for the optimizer.
+        _build_optimizer_chain: Constructs the final optimizer chain.
     """
 
-    _OPTIMIZER_REGISTRY: tp.ClassVar = {
-        "adafactor": (optax.adafactor, AdafactorConfig),
-        "adamw": (optax.adamw, AdamWConfig),
-        "lion": (optax.lion, LionConfig),
-        "mars": (mars, MarsConfig),
-        "muon": (optax.contrib.muon, MuonConfig),
-        "rmsprop": (optax.rmsprop, RMSPropConfig),
-        "skew": (white_kron.skew, WhiteKronConfig),
-        "quad": (white_kron.quad, WhiteKronConfig),
-    }
-
-    @classmethod
-    def register_optimizer(cls, name: str, optimizer_cls: type, config_cls: type):
+    @staticmethod
+    def _get_config_class(optimizer_type: str) -> type:
         """
-        Register a new optimizer type.
+        Get the configuration class for an optimizer type.
 
         Args:
-            name (str): Name of the optimizer.
-            optimizer_cls (Type): Optimizer class.
-            config_cls (Type): Configuration class for the optimizer.
+            optimizer_type: Name of the optimizer.
+
+        Returns:
+            Configuration class for the optimizer.
+
+        Raises:
+            ValueError: If optimizer type is not registered.
         """
-        cls._OPTIMIZER_REGISTRY[name] = (optimizer_cls, config_cls)
+        if optimizer_type not in _OPTIMIZER_BUILDER_REGISTRY:
+            available = sorted(_OPTIMIZER_BUILDER_REGISTRY.keys())
+            raise ValueError(f"Unsupported optimizer: {optimizer_type}. Available: {available}")
+
+        builder_cls = _OPTIMIZER_BUILDER_REGISTRY[optimizer_type]
+        # Get the config type from the builder's type hint
+        config_field = next((f for f in fields(builder_cls) if f.name == "config"), None)
+        if config_field and config_field.type:
+            return config_field.type
+
+        raise ValueError(f"Builder class for '{optimizer_type}' does not have a valid config field")
 
     @classmethod
     def create(
         cls,
         optimizer_type: str,
-        scheduler_config: SchedulerConfig,
-        optimizer_config: AdafactorConfig
-        | AdamWConfig
-        | KronConfig
-        | LionConfig
-        | MarsConfig
-        | MuonConfig
-        | RMSPropConfig
-        | SoapConfig
-        | WhiteKronConfig = None,
+        scheduler_config: SchedulerConfig | None = None,
+        optimizer_config: TxConfigs | None = None,
         *,
         weight_decay: float = 0.0,
         weight_decay_mask: tp.Any | None = None,
@@ -231,41 +242,47 @@ class OptimizerFactory:
             TypeError: If the configuration type is invalid.
         """
 
-        if optimizer_type not in cls._OPTIMIZER_REGISTRY:
-            raise ValueError(
-                f"Unsupported optimizer: {optimizer_type}. Available: {list(cls._OPTIMIZER_REGISTRY.keys())}"
-            )
+        # Get the appropriate config class
+        config_cls = cls._get_config_class(optimizer_type)
 
+        # Create default config if none provided
         if optimizer_config is None:
-            optimizer_config = cls._OPTIMIZER_REGISTRY[optimizer_type][1]()
+            optimizer_config = config_cls()
             for key in list(kwargs.keys()):
                 if key in inspect.signature(optimizer_config.__class__).parameters:
                     setattr(optimizer_config, key, kwargs.pop(key))
+        if scheduler_config is None:
+            scheduler_config = SchedulerConfig()
+        # Convert string dtypes to JAX dtypes
         cls._convert_dtypes(optimizer_config)
-        optimizer_cls, config_cls = cls._OPTIMIZER_REGISTRY[optimizer_type]
 
+        # Validate config type
         if not isinstance(optimizer_config, config_cls):
             raise TypeError(
                 f"Invalid config type {type(optimizer_config)} for optimizer {optimizer_type}. Expected {config_cls}"
             )
 
+        # Validate scheduler config
         if scheduler_config.scheduler_type is None and scheduler_config.warmup_steps:
             raise ValueError("Warmup steps require specifying a scheduler type")
 
-        scheduler = SchedulerFactory.create_scheduler(
-            scheduler_config,
-            custom_scheduler,
-        )
+        # Create scheduler
+        scheduler = SchedulerFactory.create_scheduler(scheduler_config, custom_scheduler)
 
-        return cls._build_optimizer(
-            optimizer_cls=optimizer_cls,
-            optimizer_config=optimizer_config,
+        # Create optimizer using builder pattern
+        builder_cls = _OPTIMIZER_BUILDER_REGISTRY[optimizer_type]
+        builder = builder_cls(config=optimizer_config)
+        builder.validate()
+        base_optimizer = builder.build(scheduler)
+
+        # Build the full optimizer chain (clip, base optimizer, weight decay, multi-step)
+        return cls._build_optimizer_chain(
+            base_optimizer=base_optimizer,
             scheduler=scheduler,
             weight_decay=weight_decay,
             weight_decay_mask=weight_decay_mask,
             gradient_accumulation_steps=gradient_accumulation_steps,
             clip_grad=clip_grad,
-            **kwargs,
         )
 
     @staticmethod
@@ -310,50 +327,53 @@ class OptimizerFactory:
                     msg += f". Did you mean: {suggestions}?"
                 raise ValueError(msg)
 
-    @classmethod
-    def _build_optimizer(
-        cls,
-        optimizer_cls: type,
-        optimizer_config: tp.Any,
+    @staticmethod
+    def _build_optimizer_chain(
+        base_optimizer: optax.GradientTransformation,
         scheduler: optax.Schedule,
-        **common_kwargs,
+        weight_decay: float = 0.0,
+        weight_decay_mask: tp.Any | None = None,
+        gradient_accumulation_steps: int = 1,
+        clip_grad: float | None = None,
     ) -> tuple[optax.GradientTransformation, optax.Schedule]:
         """
-        Construct the final optimizer chain.
+        Construct the final optimizer chain with gradient clipping, weight decay, and accumulation.
 
         Args:
-            optimizer_cls (Type): Optimizer class.
-            optimizer_config (Any): Optimizer configuration.
-            scheduler (optax.Schedule): Learning rate scheduler.
-            **common_kwargs: Common keyword arguments.
+            base_optimizer: Base optimizer transformation.
+            scheduler: Learning rate scheduler.
+            weight_decay: Weight decay coefficient. Defaults to 0.0.
+            weight_decay_mask: Mask for weight decay application. Defaults to None.
+            gradient_accumulation_steps: Steps for gradient accumulation. Defaults to 1.
+            clip_grad: Global gradient norm clipping value. Defaults to None.
 
         Returns:
-            Tuple[optax.GradientTransformation, optax.Schedule]: A tuple containing the optimizer and scheduler.
+            Tuple[optax.GradientTransformation, optax.Schedule]: A tuple containing the optimizer chain and scheduler.
         """
-
-        config_dict = {k: v for k, v in vars(optimizer_config).items() if not k.startswith("_")}
-
-        optimizer = optimizer_cls(learning_rate=scheduler, **config_dict)
-
         chain = []
 
-        if common_kwargs.get("clip_grad"):
-            chain.append(optax.clip_by_global_norm(common_kwargs["clip_grad"]))
+        # Add gradient clipping if specified
+        if clip_grad:
+            chain.append(optax.clip_by_global_norm(clip_grad))
 
-        chain.append(optimizer)
+        # Add base optimizer
+        chain.append(base_optimizer)
 
-        if common_kwargs["weight_decay"] != 0.0:
+        # Add weight decay if specified
+        if weight_decay != 0.0:
             chain.append(
                 optax_add_scheduled_weight_decay(
-                    lambda step: -scheduler(step) * common_kwargs["weight_decay"],
-                    common_kwargs["weight_decay_mask"],
+                    lambda step: -scheduler(step) * weight_decay,
+                    weight_decay_mask,
                 )
             )
 
+        # Chain all transformations
         tx = optax.chain(*chain)
 
-        if common_kwargs["gradient_accumulation_steps"] > 1:
-            tx = optax.MultiSteps(tx, common_kwargs["gradient_accumulation_steps"])
+        # Add gradient accumulation if specified
+        if gradient_accumulation_steps > 1:
+            tx = optax.MultiSteps(tx, gradient_accumulation_steps)
 
         return tx, scheduler
 
@@ -371,12 +391,9 @@ class OptimizerFactory:
         Raises:
             ValueError: If the optimizer type is unknown.
         """
-        try:
-            config_cls = cls._OPTIMIZER_REGISTRY[optimizer_type][1]
-        except KeyError:
-            raise ValueError(f"Unknown optimizer type: {optimizer_type}") from None
+        config_cls = cls._get_config_class(optimizer_type)
 
-        fields = []
+        fields_list = []
         for field in dataclasses.fields(config_cls):
             field_type = tp.get_type_hints(config_cls)[field.name]
             default = f" = {field.default}" if not isinstance(field.default, dataclasses._MISSING_TYPE) else ""
@@ -386,9 +403,9 @@ class OptimizerFactory:
             else:
                 type_name = str(field_type)
 
-            fields.append(f"    {field.name}: {type_name}{default}")
+            fields_list.append(f"    {field.name}: {type_name}{default}")
 
-        return f"{config_cls.__name__}(\n" + "\n".join(fields) + "\n)"
+        return f"{config_cls.__name__}(\n" + "\n".join(fields_list) + "\n)"
 
     @classmethod
     def serialize_config(
@@ -438,10 +455,7 @@ class OptimizerFactory:
             ValueError: If the optimizer type is unknown or the format is unsupported.
             TypeError: If the input data type is invalid.
         """
-        try:
-            config_cls = cls._OPTIMIZER_REGISTRY[optimizer_type][1]
-        except KeyError:
-            raise ValueError(f"Unknown optimizer type: {optimizer_type}") from None
+        config_cls = cls._get_config_class(optimizer_type)
 
         if format == "json":
             if not isinstance(data, str):

@@ -107,7 +107,7 @@ def _def_scale(
 
         large_state: list[Any] = []
 
-        leaves, tdef = jax.tree.flatten(params_unboxed)
+        leaves, _tdef = jax.tree.flatten(params_unboxed)
         flags, _ = jax.tree.flatten(scanned_flags)
 
         for leaf, scanned in zip(leaves, flags, strict=False):

@@ -434,7 +434,7 @@ class AsyncCheckpointManager:
             tree = jax.tree_util.tree_map(
                 lambda x: _to_host(x, float_dtype, mesh, cpu_offload),
                 tree,
-                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),  # noqa
+                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),
             )
         elif do_all_gather and self.use_tensorstore and self.verbose:
             logger.warning("Ignoring do_all_gather for TensorStore backend to preserve sharding (TP+FSDP).")
@@ -955,7 +955,7 @@ class AsyncCheckpointManager:
             pytree = jax.tree_util.tree_map(
                 lambda x: (_is_array_like(x) and _to_host(x, use_dtype, mesh, cpu_offload)) or x,
                 pytree,
-                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),  # noqa
+                is_leaf=lambda x: isinstance(x, (jax.Array, np.generic, float, int)),
             )
 
         leaves, treedef = jax.tree_util.tree_flatten(pytree, is_leaf=_is_none)

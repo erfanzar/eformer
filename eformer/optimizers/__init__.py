@@ -13,6 +13,25 @@
 # limitations under the License.
 
 
+from ._base import (
+    OptimizerBuilder,
+    SchedulerBuilder,
+    register_optimizer,
+    register_scheduler,
+)
+from ._builders import (
+    AdafactorOptimizer,
+    AdamWOptimizer,
+    ConstantSchedulerBuilder,
+    CosineSchedulerBuilder,
+    LinearSchedulerBuilder,
+    LionOptimizer,
+    MarsOptimizer,
+    MuonOptimizer,
+    QuadOptimizer,
+    RMSPropOptimizer,
+    SkewOptimizer,
+)
 from ._config import (
     AdafactorConfig,
     AdamWConfig,
@@ -23,6 +42,7 @@ from ._config import (
     RMSPropConfig,
     SchedulerConfig,
     ScionConfig,
+    SerializationMixin,
     SoapConfig,
     WhiteKronConfig,
 )
@@ -30,16 +50,32 @@ from ._factory import OptimizerFactory, SchedulerFactory
 
 __all__ = (
     "AdafactorConfig",
+    "AdafactorOptimizer",
     "AdamWConfig",
+    "AdamWOptimizer",
+    "ConstantSchedulerBuilder",
+    "CosineSchedulerBuilder",
     "KronConfig",
+    "LinearSchedulerBuilder",
     "LionConfig",
+    "LionOptimizer",
     "MarsConfig",
+    "MarsOptimizer",
     "MuonConfig",
+    "MuonOptimizer",
+    "OptimizerBuilder",
     "OptimizerFactory",
+    "QuadOptimizer",
     "RMSPropConfig",
+    "RMSPropOptimizer",
+    "SchedulerBuilder",
     "SchedulerConfig",
     "SchedulerFactory",
     "ScionConfig",
+    "SerializationMixin",
+    "SkewOptimizer",
     "SoapConfig",
     "WhiteKronConfig",
+    "register_optimizer",
+    "register_scheduler",
 )

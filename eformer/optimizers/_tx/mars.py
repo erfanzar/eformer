@@ -20,6 +20,7 @@ import jax
 import optax
 from jax import numpy as jnp
 from optax import tree_utils as otu
+from optax._src import transform
 
 
 class ScaleByMarsState(NamedTuple):
@@ -104,4 +105,4 @@ def mars(learning_rate: float | optax.Schedule, **kwargs) -> optax.GradientTrans
     Returns:
         optax.GradientTransformation: The Mars optimizer.
     """
-    return optax.chain(scale_by_mars(**kwargs), optax.scale(-learning_rate))
+    return optax.chain(scale_by_mars(**kwargs), transform.scale_by_learning_rate(learning_rate))

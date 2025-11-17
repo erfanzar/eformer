@@ -1,7 +1,7 @@
-eformer.optimizers._custom.mars
+eformer.optimizers._tx.__init__
 ===============================
 
-.. automodule:: eformer.optimizers._custom.mars
+.. automodule:: eformer.optimizers._tx.__init__
     :members:
     :undoc-members:
     :show-inheritance:

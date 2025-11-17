@@ -14,6 +14,25 @@
 
 
 from .mars import mars, scale_by_mars
+from .utils import (
+    OptaxScheduledWeightDecayState,
+    create_cosine_scheduler,
+    create_linear_scheduler,
+    get_base_optimizer,
+    optax_add_scheduled_weight_decay,
+)
 from .white_kron import quad, scale_by_quad, scale_by_skew, skew
 
-__all__ = ("mars", "quad", "scale_by_mars", "scale_by_quad", "scale_by_skew", "skew")
+__all__ = (
+    "OptaxScheduledWeightDecayState",
+    "create_cosine_scheduler",
+    "create_linear_scheduler",
+    "get_base_optimizer",
+    "mars",
+    "optax_add_scheduled_weight_decay",
+    "quad",
+    "scale_by_mars",
+    "scale_by_quad",
+    "scale_by_skew",
+    "skew",
+)

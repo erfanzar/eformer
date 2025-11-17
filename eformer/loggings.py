@@ -70,6 +70,9 @@ _LOGGING_LEVELS: dict[str, int] = {
 }
 
 
+_logged_once: set[tuple[str, ...]] = set()
+
+
 class ColorFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         orig_levelname = record.levelname
@@ -96,6 +99,7 @@ class LazyLogger:
         self._name = name
         self._level = level
         self._logger: logging.Logger | None = None
+        self._logged_once_lock = threading.Lock()
 
     @property
     def level(self):
@@ -129,6 +133,41 @@ class LazyLogger:
         logger.addHandler(console_handler)
 
         self._logger = logger
+
+    def _log_once(self, level: int, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log a message only once per unique message."""
+        # Create a hashable key from the level, message, and args
+        message_key = (logging.getLevelName(level), message, *args)
+        with self._logged_once_lock:
+            if message_key not in _logged_once:
+                _logged_once.add(message_key)
+                self._ensure_initialized()
+                self._logger.log(level, message, *args, **kwargs)
+
+    def debug_once(self, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log a debug message only once per unique message."""
+        self._log_once(logging.DEBUG, message, *args, **kwargs)
+
+    def info_once(self, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log an info message only once per unique message."""
+        self._log_once(logging.INFO, message, *args, **kwargs)
+
+    def warn_once(self, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log a warning message only once per unique message."""
+        self._log_once(logging.WARNING, message, *args, **kwargs)
+
+    def warning_once(self, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log a warning message only once per unique message (alias for warn_once)."""
+        self._log_once(logging.WARNING, message, *args, **kwargs)
+
+    def error_once(self, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
+        """Log an error message only once per unique message."""
+        self._log_once(logging.ERROR, message, *args, **kwargs)
+
+    def clear_once_cache(self) -> None:
+        """Clear the cache of messages logged with *_once methods."""
+        with self._logged_once_lock:
+            self._logged_once.clear()
 
     def __getattr__(self, name: str) -> tp.Callable:
         if name in _LOGGING_LEVELS or name.upper() in _LOGGING_LEVELS or name in ("exception", "log"):

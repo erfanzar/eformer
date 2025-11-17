@@ -62,7 +62,7 @@ from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
 
-from eformer.jaximus import ImplicitArray, register
+from eformer.jaximus import ImplicitArray, register, ste
 
 from .quantization_functions import dequantize_int8, quantize_int8
 
@@ -464,3 +464,13 @@ def gather_8bit_operand(primitive: Primitive, operand: Array8B, *args, **kwargs)
     array = operand.materialize()
     result = jax.lax.gather(array, *args, **kwargs)
     return result
+
+
+@ste
+def straight_through_8bit(weights: jax.Array, axis: int | None = None):
+    """
+    Dummy Straight-through 8BIT emulator.
+    """
+
+    quantized = Array8B.quantize(weights, axis=axis)
+    return quantized.materialize()

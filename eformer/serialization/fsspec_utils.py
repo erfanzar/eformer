@@ -134,8 +134,8 @@ def join_path(lhs, rhs):
         >>> join_path("/local/dir", "gs://bucket/file.txt")
         'gs://bucket/file.txt'
     """
-    lhs_protocol, lhs_rest = fsspec.core.split_protocol(lhs)
-    rhs_protocol, rhs_rest = fsspec.core.split_protocol(rhs)
+    lhs_protocol, _lhs_rest = fsspec.core.split_protocol(lhs)
+    rhs_protocol, _rhs_rest = fsspec.core.split_protocol(rhs)
 
     if rhs_protocol is not None and lhs_protocol is not None and lhs_protocol != rhs_protocol:
         raise ValueError(f"Cannot join paths with different protocols: {lhs} and {rhs}")

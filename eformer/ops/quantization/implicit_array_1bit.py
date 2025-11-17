@@ -62,7 +62,7 @@ from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
 
-from eformer.jaximus import ImplicitArray, register
+from eformer.jaximus import ImplicitArray, register, ste
 
 from .quantization_functions import pack_weights_1bit, unpack_weights_1bit
 
@@ -462,3 +462,13 @@ def gather_1bit_operand(primitive: Primitive, operand: Array1B, *args, **kwargs)
     array = operand.materialize()
     result = jax.lax.gather(array, *args, **kwargs)
     return result
+
+
+@ste
+def straight_through_1bit(weights: jax.Array, axis: int | None = None):
+    """
+    Dummy Straight-through 1BIT emulator.
+    """
+
+    quantized = Array1B.quantize(weights, axis=axis)
+    return quantized.materialize()
