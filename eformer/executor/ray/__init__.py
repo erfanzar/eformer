@@ -74,6 +74,8 @@ from .docker_executor import (
 )
 from .executor import (
     RayExecutor,
+    autoscale_execute,
+    autoscale_execute_resumable,
     device_remote,
     execute,
     execute_multislice,
@@ -145,6 +147,8 @@ __all__ = (
     "SnitchRecipient",
     "StopwatchActor",
     "TpuAcceleratorConfig",
+    "autoscale_execute",
+    "autoscale_execute_resumable",
     "available_cpu_cores",
     "build_and_push_docker_image",
     "current_actor_handle",

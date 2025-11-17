@@ -203,6 +203,7 @@ def _cached_mesh_impl(
     total_devices = jax.device_count(backend)
     local_devices = jax.local_device_count(backend)
     process_count = jax.process_count()
+    global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
 
     num_slices = 1
     if devices and hasattr(devices[0], "slice_index"):
@@ -248,8 +249,6 @@ def _cached_mesh_impl(
         return tuple(int(v) for v in shp)
 
     if num_slices > 1:
-        global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
-
         dynamic_axis = next((i for i, dim in enumerate(global_mesh_shape) if dim % num_slices == 0), None)
         if dynamic_axis is None:
             raise ValueError(
@@ -278,11 +277,13 @@ def _cached_mesh_impl(
         )
 
     elif process_count > 1:
-        local_mesh_shape = np.arange(local_devices).reshape(axis_dims).shape
+        local_mesh_shape = calculate_host_mesh_shape(
+            global_mesh_shape=global_mesh_shape,
+            total_devices=local_devices,
+            num_processes=process_count,
+        )
 
         if dcn_mesh_dims is None:
-            global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
-
             ratios = [int(g // le) for g, le in zip(global_mesh_shape, local_mesh_shape, strict=False)]
             if np.prod(ratios) != process_count:
                 ratios = [1] * len(axis_dims)
@@ -303,7 +304,6 @@ def _cached_mesh_impl(
         )
 
     else:
-        global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
         ndarray = create_device_mesh(
             mesh_shape=global_mesh_shape,
             devices=devices,
@@ -320,6 +320,7 @@ def create_mesh(
     should_sort_granules_by_key: bool = True,
     allow_split_physical_axes: bool = True,
     backend: str | None = None,
+    use_jax: bool = True,
 ) -> Mesh:
     """Create a JAX mesh for distributed computation.
 
@@ -356,7 +357,7 @@ def create_mesh(
         >>> with mesh:
         ...     sharded_fn = pjit(fn, in_shardings=..., out_shardings=...)
     """
-    if hasattr(jax, "make_mesh"):
+    if use_jax:
         total_devices = jax.device_count(backend)
         process_count = jax.process_count()
         axis_dims = np.arange(total_devices).reshape(axis_dims).shape

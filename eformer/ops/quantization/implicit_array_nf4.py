@@ -808,7 +808,7 @@ def gather_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args: Any, **kw
 @ste
 def straight_through_nf4(weights: jax.Array, block_size: int = 64):
     """
-    Dummy Straight-through NF4 emulator.
+    Straight-through NF4 emulator.
     """
 
     return ArrayNF4.quantize(weights, block_size=block_size).materialize()

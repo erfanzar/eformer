@@ -469,8 +469,7 @@ def gather_8bit_operand(primitive: Primitive, operand: Array8B, *args, **kwargs)
 @ste
 def straight_through_8bit(weights: jax.Array, axis: int | None = None):
     """
-    Dummy Straight-through 8BIT emulator.
+    Straight-through 8BIT emulator.
     """
 
-    quantized = Array8B.quantize(weights, axis=axis)
-    return quantized.materialize()
+    return Array8B.quantize(weights, axis=axis).materialize()

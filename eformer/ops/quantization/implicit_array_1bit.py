@@ -467,8 +467,7 @@ def gather_1bit_operand(primitive: Primitive, operand: Array1B, *args, **kwargs)
 @ste
 def straight_through_1bit(weights: jax.Array, axis: int | None = None):
     """
-    Dummy Straight-through 1BIT emulator.
+    Straight-through 1BIT emulator.
     """
 
-    quantized = Array1B.quantize(weights, axis=axis)
-    return quantized.materialize()
+    return Array1B.quantize(weights, axis=axis).materialize()

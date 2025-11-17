@@ -691,6 +691,24 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
             runtime_env=self.execution_env,
         )
 
+    def redecorate_remote_fn_for_call(
+        self,
+        remote_fn: RemoteFunction | tp.Callable,
+        **extra_envs,
+    ):
+        """Prepare a remote function for CPU execution with merged runtime env."""
+        remote_fn = RayResources.forkify_remote_fn(remote_fn)
+        if not isinstance(remote_fn, RemoteFunction):
+            remote_fn = ray.remote(remote_fn)
+
+        runtime_env = RayResources.update_fn_resource_env(
+            remote_fn=remote_fn,
+            runtime_env=self.execution_env,
+            **extra_envs,
+        )
+
+        return remote_fn.options(num_cpus=self.core_count, runtime_env=runtime_env)
+
 
 @dataclass(frozen=True)
 class GpuAcceleratorConfig(ComputeResourceConfig):
@@ -809,6 +827,32 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
             accelerator_type=self.gpu_model,
             runtime_env=self.execution_env,
         )
+
+    def redecorate_remote_fn_for_call(
+        self,
+        remote_fn: RemoteFunction | tp.Callable,
+        **extra_envs,
+    ):
+        """Prepare a remote function for GPU execution with merged runtime env."""
+        remote_fn = RayResources.forkify_remote_fn(remote_fn)
+        if not isinstance(remote_fn, RemoteFunction):
+            remote_fn = ray.remote(remote_fn)
+
+        runtime_env = RayResources.update_fn_resource_env(
+            remote_fn=remote_fn,
+            runtime_env=self.execution_env,
+            **extra_envs,
+        )
+
+        remote_options = {
+            "num_cpus": self.cpu_count,
+            "num_gpus": self.device_count,
+            "runtime_env": runtime_env,
+        }
+        if self.gpu_model is not None:
+            remote_options["accelerator_type"] = self.gpu_model
+
+        return remote_fn.options(**remote_options)
 
 
 @dataclass(frozen=True)

@@ -731,6 +731,9 @@ class RayExecutor:
             "Exhausted retries for multislice execution without explicit success or reaching failure/preemption limits."
         ) from problem
 
+    autoscale_execute = execute_multislice
+    autoscale_execute_resumable = execute_multislice_resumable
+
 
 def execute_resumable(accelerator_config: AcceleratorConfigType):
     """Decorator for fault-tolerant single-pod execution.
@@ -1442,3 +1445,7 @@ def device_remote(*, accelerator_config: TpuAcceleratorConfig, flatten: bool = T
             raise TypeError("tpu_remote can only decorate a function or a class.")
 
     return decorator
+
+
+autoscale_execute = execute_multislice
+autoscale_execute_resumable = execute_multislice_resumable

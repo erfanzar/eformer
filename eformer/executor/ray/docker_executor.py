@@ -294,15 +294,9 @@ def run_docker_multislice(
         >>> print(f"Got {len(outputs)} outputs from {tpu_config.num_slices} slices")
     """
 
-    def run_docker_with_slice_env(slice_id: int) -> tuple[int, str, str]:
-        """Run Docker with slice-specific environment variables.
-
-        Args:
-            slice_id (int): The slice ID to run on.
-
-        Returns:
-            tuple[int, str, str]: Tuple of (return_code, stdout, stderr).
-        """
+    def run_docker_with_slice_env() -> tuple[int, str, str]:
+        """Run Docker with slice-specific environment variables."""
+        slice_id = os.environ.get("EXECUTOR_CALL_SLICE", "0")
         slice_config = DockerConfig(
             image=docker_config.image,
             command=docker_config.command,

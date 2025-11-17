@@ -531,7 +531,14 @@ def flatten_mapping(
     keep_empty_nodes: bool = False,
     is_leaf: None | IsLeafCallable = None,
     sep: None = None,
-) -> dict[tuple[Any, ...], Any]: ...
+) -> dict[tuple[Any, ...], Any]:
+    """Flatten ``xs`` to tuple-key mapping when no separator is provided.
+
+    Example:
+        >>> flatten_mapping({'foo': {'bar': 1}})
+        {('foo', 'bar'): 1}
+    """
+    ...
 
 
 @overload
@@ -542,7 +549,14 @@ def flatten_mapping(
     keep_empty_nodes: bool = False,
     is_leaf: None | IsLeafCallable = None,
     sep: str,
-) -> dict[str, Any]: ...
+) -> dict[str, Any]:
+    """Flatten ``xs`` to a mapping whose keys are ``sep``-joined strings.
+
+    Example:
+        >>> flatten_mapping({'foo': {'bar': 1}}, sep='.')
+        {'foo.bar': 1}
+    """
+    ...
 
 
 def flatten_mapping(
@@ -652,15 +666,46 @@ def flatten_to_sequence(
 
 
 @overload
-def unflatten_mapping(xs: Sequence[tuple[tuple[Any, ...], Any]], /, *, sep: None = None) -> dict[Any, Any]: ...
+def unflatten_mapping(
+    xs: Sequence[tuple[tuple[Any, ...], Any]],
+    /,
+    *,
+    sep: None = None,
+) -> dict[Any, Any]:
+    """Expand a sequence of tuple-key/value pairs back into a nested mapping.
+
+    Example:
+        >>> unflatten_mapping([(('a',), 1), (('b', 'c'), 2)])
+        {'a': 1, 'b': {'c': 2}}
+    """
+    ...
 
 
 @overload
-def unflatten_mapping(xs: Mapping[tuple[Any, ...], Any], /, *, sep: None = None) -> dict[Any, Any]: ...
+def unflatten_mapping(
+    xs: Mapping[tuple[Any, ...], Any],
+    /,
+    *,
+    sep: None = None,
+) -> dict[Any, Any]:
+    """Expand a tuple-key mapping (from ``flatten_mapping``) into a nested dict.
+
+    Example:
+        >>> unflatten_mapping({('a',): 1, ('b', 'c'): 2})
+        {'a': 1, 'b': {'c': 2}}
+    """
+    ...
 
 
 @overload
-def unflatten_mapping(xs: Mapping[str, Any], /, *, sep: str) -> dict[Any, Any]: ...
+def unflatten_mapping(xs: Mapping[str, Any], /, *, sep: str) -> dict[Any, Any]:
+    """Expand a string-key mapping using ``sep`` to split names.
+
+    Example:
+        >>> unflatten_mapping({'a': 1, 'b.c': 2}, sep='.')
+        {'a': 1, 'b': {'c': 2}}
+    """
+    ...
 
 
 def unflatten_mapping(xs: Any, /, *, sep: str | None = None) -> dict[Any, Any]:
@@ -1980,3 +2025,63 @@ def unpack_pytree(offset_tree: PyTree, packed: jnp.ndarray) -> PyTree:
         leaves.append(leaf)
 
     return jax.tree_util.tree_unflatten(treedef, leaves)
+
+
+def join_key(prefix, k):
+    """Concatenate ``prefix`` and key ``k`` using dot-notation.
+
+    Example:
+        >>> join_key('layer', 'weight')
+        'layer.weight'
+    """
+    if k is None:
+        return prefix
+    return f"{prefix}.{k}" if prefix else k
+
+
+def leaf_key_paths(
+    pytree,
+    prefix: str | None = "",
+    *,
+    is_leaf: Callable[[Any], bool] | None = None,
+    use_state_dict_keys: bool = False,
+):
+    """Return a tree mirroring `pytree` whose leaves are their dot-path strings.
+
+    Args:
+        pytree: The input tree to traverse.
+        prefix: Optional prefix added to every returned path. ``None`` resets to ``""``.
+        is_leaf: Optional custom leaf predicate forwarded to :func:`jax.tree_util.tree_flatten_with_path`.
+        use_state_dict_keys: Reserved for compatibility with other libraries; currently unused.
+
+    Returns:
+        A PyTree with the same structure as ``pytree`` whose leaves are strings representing
+        the dotted traversal path, or ``None`` when ``pytree`` has no leaves.
+
+    Example:
+        >>> tree = {"layer": {"w": 1, "b": 2}, "scale": 3}
+        >>> leaf_key_paths(tree)
+        {'layer': {'w': 'layer.w', 'b': 'layer.b'}, 'scale': 'scale'}
+    """
+    del use_state_dict_keys
+    prefix = "" if prefix is None else prefix
+
+    if is_leaf is not None and is_leaf(pytree):
+        return prefix
+    if pytree is None:
+        return None
+
+    flattened, treedef = jax.tree_util.tree_flatten_with_path(pytree, is_leaf=is_leaf)
+    if not flattened:
+        return None
+
+    out_leaves: list[str] = []
+    for path, _ in flattened:
+        key = prefix
+        if path:
+            for entry in path:
+                entry_str = key_path_to_str([entry])
+                key = join_key(key, entry_str)
+        out_leaves.append(key)
+
+    return jax.tree_util.tree_unflatten(treedef, out_leaves)

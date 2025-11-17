@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from ._config import QuantizationConfig, QuantizationType, quantize, straight_through
 from .implicit_array_1bit import Array1B, straight_through_1bit
 from .implicit_array_8bit import Array8B, straight_through_8bit
 from .implicit_array_nf4 import ArrayNF4, straight_through_nf4
@@ -22,10 +23,14 @@ __all__ = (
     "Array1B",
     "Array8B",
     "ArrayNF4",
+    "QuantizationConfig",
+    "QuantizationType",
     "RSROperatorBinary",
     "RSROperatorTernary",
     "is_kernel_available",
     "nf4_use_kernel",
+    "quantize",
+    "straight_through",
     "straight_through_1bit",
     "straight_through_8bit",
     "straight_through_nf4",

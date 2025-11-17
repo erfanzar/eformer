@@ -250,6 +250,26 @@ class ExpertRowWiseAlt(DynamicShardingAxes):
     mode: tp.ClassVar = MODE_TRAIN
 
 
+class UnifiedExpertColumnWise(DynamicShardingAxes):
+    """
+    Unified column-wise sharding using SP for sequence-related parameters.
+    Use this if your expert weights have a sequence-related dimension.
+    """
+
+    axes: tp.ClassVar = [[FSDP, SP, EP], EMPTY, TP]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
+class UnifiedExpertRowWise(DynamicShardingAxes):
+    """
+    Unified row-wise sharding using SP for sequence-related parameters.
+    Use this if your expert weights have a sequence-related dimension.
+    """
+
+    axes: tp.ClassVar = [[FSDP, SP, EP], TP, EMPTY]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
 class ExpertActivations(DynamicShardingAxes):
     """
     Sharding for expert activation tensors of shape [batch, sequence, num_experts, hidden].
