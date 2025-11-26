@@ -13,15 +13,18 @@
 # limitations under the License.
 
 
+from __future__ import annotations
+
+import dataclasses
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any
 
 import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
+from jax.sharding import NamedSharding, PartitionSpec
 
 from eformer.jaximus import ImplicitArray, aux_field, register, ste
 
@@ -29,9 +32,10 @@ from . import quantization_functions as _quantization_impl
 from .quantization_functions import bmm_nf4, bmm_nf4_transpose, dequantize_nf4, nf4_matmul, quantize_and_pack_nf4
 
 Array = jax.Array
+ShardingType = NamedSharding | PartitionSpec | None
 
 
-@dataclass
+@dataclasses.dataclass
 class ArrayNF4(ImplicitArray):
     """
     4-bit NormalFloat Quantization Class
@@ -44,25 +48,21 @@ class ArrayNF4(ImplicitArray):
         packed (jax.Array): The packed 4-bit integer array.
         absmax (jax.Array): The absolute maximum values for each block.
         block_size (int): The size of each quantization block (static).
-        mesh_and_axis (Optional[Tuple]): Sharding configuration for distributed operations (static).
+        sharding (ShardingType): The sharding specification to preserve across operations (static).
 
     Methods:
         quantize(array, block_size): Creates a quantized ArrayNF4 from input array.
         materialize(): Reconstructs the original array from the quantized data.
+        with_sharding(sharding): Returns a new ArrayNF4 with the specified sharding applied.
     """
 
     packed: Array
     absmax: Array
     block_size: int = aux_field()
-    mesh_and_axis: tuple[jax.sharding.Mesh, int | None] | None = aux_field(default=None)
+    sharding: ShardingType = aux_field(default=None)  # noqa: RUF009
 
     @classmethod
-    def quantize(
-        cls,
-        array: Array,
-        block_size: int = 64,
-        verbose=False,
-    ):
+    def quantize(cls, array: Array, block_size: int = 64) -> ArrayNF4:
         """
         Initializes the `ArrayNF4` object by quantizing the input array.
 
@@ -70,14 +70,18 @@ class ArrayNF4(ImplicitArray):
             array (jax.Array): The input array to be quantized.
             block_size (int): The size of each quantization block. Defaults to 64.
             verbose (bool): Print verbose information. Defaults to False.
+
+        Returns:
+            ArrayNF4: The quantized array with sharding preserved from input.
         """
-        # Ensure last dimension is divisible by block_size
+        input_sharding = None
+        if hasattr(array, "sharding") and isinstance(array.sharding, NamedSharding):
+            input_sharding = array.sharding
+
         if array.shape[-1] % block_size != 0:
-            # Pad last dimension to be divisible by block_size
             pad_width = [(0, 0)] * (array.ndim - 1) + [(0, block_size - array.shape[-1] % block_size)]
             array = jnp.pad(array, pad_width, mode="constant", constant_values=0)
 
-        # Quantize along last dimension only - preserves structure
         packed, absmax = quantize_and_pack_nf4(array, block_size)
         return cls(
             packed=packed,
@@ -85,18 +89,17 @@ class ArrayNF4(ImplicitArray):
             block_size=block_size,
             shape=array.shape,
             dtype=array.dtype,
-            mesh_and_axis=None,
+            sharding=input_sharding,
         )
 
-    def materialize(self):
+    def materialize(self) -> Array:
         """
         Reconstructs the original array from the quantized data.
 
         Returns:
-            jax.Array: The dequantized array.
+            jax.Array: The dequantized array with sharding constraint applied if available.
         """
-
-        return (
+        result = (
             dequantize_nf4(
                 self.packed.astype(jnp.uint8),
                 self.absmax,
@@ -106,30 +109,64 @@ class ArrayNF4(ImplicitArray):
             .astype(self.dtype)
         )
 
-    def dequantize(self):
+        # Apply sharding constraint if available
+        if self.sharding is not None:
+            result = _apply_sharding(result, self.sharding)
+
+        return result
+
+    def dequantize(self) -> Array:
         """Alias for materialize() for compatibility."""
         return self.materialize()
 
-    def with_mesh_and_axis(self, mesh_and_axis):
+    def with_sharding(self, sharding: ShardingType) -> ArrayNF4:
         """
-        Configure sharding for distributed operations.
+        Returns a new ArrayNF4 with the specified sharding applied to component arrays.
+
+        This method creates a copy of the quantized array with sharding constraints
+        applied to the underlying packed and absmax arrays, ensuring they are properly
+        distributed across devices.
 
         Args:
-            mesh_and_axis: Tuple of (mesh, axis) for sharding configuration
+            sharding: A NamedSharding, PartitionSpec, or None. If PartitionSpec is provided,
+                     it will be used directly. For NamedSharding, both the mesh and spec
+                     are preserved.
 
         Returns:
-            ArrayNF4 with updated sharding configuration
+            ArrayNF4: A new instance with sharding applied to component arrays.
         """
-        import dataclasses
+        new_packed = _apply_sharding(self.packed, sharding)
+        new_absmax = _apply_sharding(self.absmax, sharding)
 
-        # Simply update the mesh_and_axis attribute without applying sharding
-        # The sharding will be applied when the array is actually used
-        new_quant_matrix = dataclasses.replace(self, mesh_and_axis=mesh_and_axis)
-        return new_quant_matrix
+        return dataclasses.replace(
+            self,
+            packed=new_packed,
+            absmax=new_absmax,
+            sharding=sharding,
+        )
+
+    def reshard(self, sharding: ShardingType) -> ArrayNF4:
+        """Alias for with_sharding for API consistency."""
+        return self.with_sharding(sharding)
+
+    @property
+    def is_sharded(self) -> bool:
+        """Returns True if this array has sharding information."""
+        return self.sharding is not None
 
     def delete(self):
         self.packed.delete()
         self.absmax.delete()
+
+
+def _apply_sharding(array: Array, sharding: ShardingType) -> Array:
+    """Apply sharding constraint to an array if sharding is specified."""
+    if sharding is None:
+        return array
+
+    from eformer.escale import with_sharding_constraint
+
+    return with_sharding_constraint(array, sharding)
 
 
 ArrayType = Array | ArrayNF4 | Any
@@ -601,8 +638,7 @@ def transpose_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args: Any, *
     Custom handler for JAX's transpose operation.
 
     Materializes ArrayNF4 input before performing the operation.
-    Re-quantizes the result if the input was ArrayNF4. Note: Original code didn't re-quantize transpose, corrected here
-        based on reshape pattern.
+    Re-quantizes the result if the input was ArrayNF4. Preserves sharding from the original array.
 
     Args:
       primitive: The JAX primitive being handled.
@@ -611,12 +647,14 @@ def transpose_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args: Any, *
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      The result of lax.transpose operation, potentially re-quantized.
+      The result of lax.transpose operation, potentially re-quantized with sharding preserved.
     """
-
     array = operand.materialize()
     result_mat = lax.transpose(array, *args, **kwargs)
     result = ArrayNF4.quantize(result_mat, block_size=operand.block_size)
+    # Preserve sharding from original operand
+    if operand.sharding is not None:
+        result = result.with_sharding(operand.sharding)
     return result
 
 
@@ -732,6 +770,7 @@ def reshape_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args, **params
 
     This function handles reshaping for ArrayNF4 quantized arrays.
     It materializes ArrayNF4 input before reshaping and re-quantizes the result.
+    Preserves sharding from the original array.
 
     Args:
       primitive: The JAX primitive being handled.
@@ -740,7 +779,7 @@ def reshape_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args, **params
       **params: Keyword arguments/parameters for reshape.
 
     Returns:
-      The reshaped array, re-quantized as ArrayNF4.
+      The reshaped array, re-quantized as ArrayNF4 with sharding preserved.
 
     Raises:
       ValueError: If the new shape is not compatible with the original array's size.
@@ -752,6 +791,9 @@ def reshape_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args, **params
     result_mat = primitive.bind(*subfuns, array, *args, **bind_params)
 
     result = ArrayNF4.quantize(result_mat, block_size=operand.block_size)
+    # Preserve sharding from original operand
+    if operand.sharding is not None:
+        result = result.with_sharding(operand.sharding)
 
     return result
 
@@ -786,13 +828,16 @@ def concatenate_nf4_operands(
 
 @register("broadcast_in_dim")
 def broadcast_in_dim_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args, **params) -> ArrayType:
-    """Handle broadcast_in_dim for ArrayNF4."""
+    """Handle broadcast_in_dim for ArrayNF4. Preserves sharding from the original array."""
     array = operand.materialize()
     subfuns, bind_params = primitive.get_bind_params(params)
 
     result_mat = primitive.bind(*subfuns, array, *args, **bind_params)
 
     result = ArrayNF4.quantize(result_mat, block_size=operand.block_size)
+    # Preserve sharding from original operand
+    if operand.sharding is not None:
+        result = result.with_sharding(operand.sharding)
 
     return result
 

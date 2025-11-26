@@ -54,22 +54,26 @@ Usage Example:
     ```
 """
 
+from __future__ import annotations
+
+import dataclasses
 import typing as tp
-from dataclasses import dataclass
 
 import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
+from jax.sharding import NamedSharding, PartitionSpec
 
-from eformer.jaximus import ImplicitArray, register, ste
+from eformer.jaximus import ImplicitArray, aux_field, register, ste
 
 from .quantization_functions import dequantize_int8, quantize_int8
 
 Array = jax.Array
+ShardingType = NamedSharding | PartitionSpec | None
 
 
-@dataclass
+@dataclasses.dataclass
 class Array8B(ImplicitArray):
     """
     8-bit Quantization Class
@@ -80,14 +84,19 @@ class Array8B(ImplicitArray):
     Attributes:
       scale (jax.Array): The scale factor used for quantization.
       weight (jax.Array): The quantized 8-bit integer array.
+      axis (tuple[int, ...] | None): The axis used for quantization (static).
+      sharding (ShardingType): The sharding specification to preserve across operations (static).
 
     Methods:
-      __init__(self, array: jax.Array): Initializes the `Array8B` object by quantizing the input array.
-      materialize(self): Reconstructs the original array from the quantized data.
+      quantize(array, dtype, axis): Creates a quantized Array8B from input array.
+      materialize(): Reconstructs the original array from the quantized data.
+      with_sharding(sharding): Returns a new Array8B with the specified sharding applied.
     """
 
     scale: Array
     weight: Array
+    axis: tuple[int, ...] | None = aux_field(default=None)
+    sharding: ShardingType = aux_field(default=None)  # noqa: RUF009
 
     @classmethod
     def quantize(
@@ -95,42 +104,102 @@ class Array8B(ImplicitArray):
         array: Array,
         dtype: jnp.dtype | None = None,
         axis: int | tuple[int] | None = None,
-    ):
+    ) -> Array8B:
         """
         Initializes the `Array8B` object by quantizing the input array.
 
         Args:
           array (jax.Array): The input array to be quantized.
+          dtype (jnp.dtype | None): The dtype for materialization. Defaults to input dtype.
+          axis (int | tuple[int] | None): The axis for quantization. Defaults to (-1,).
+
+        Returns:
+          Array8B: The quantized array with sharding preserved from input.
         """
         if axis is None:
-            axis = -1
+            axis = (-1,)
+        elif not isinstance(axis, tuple):
+            axis = (axis,)
+
+        # Capture sharding from input array (only NamedSharding, not SingleDeviceSharding)
+        input_sharding = None
+        if hasattr(array, "sharding") and isinstance(array.sharding, NamedSharding):
+            input_sharding = array.sharding
+
         weight, scale = quantize_int8(x=array, axis=axis)
+
         return cls(
             weight=weight,
             scale=scale,
             shape=array.shape,
             dtype=dtype or array.dtype,
+            axis=axis,
+            sharding=input_sharding,
         )
 
-    def materialize(self):
+    def materialize(self) -> Array:
         """
         Reconstructs the original array from the quantized data.
 
         Returns:
-          jax.Array: The dequantized array.
+          jax.Array: The dequantized array with sharding constraint applied if available.
         """
-        return (
-            dequantize_int8(
-                self.weight,
-                self.scale,
-            )
-            .reshape(self.shape)
-            .astype(self.dtype)
+        result = dequantize_int8(self.weight, self.scale).reshape(self.shape).astype(self.dtype)
+
+        # Apply sharding constraint if available
+        if self.sharding is not None:
+            result = _apply_sharding(result, self.sharding)
+
+        return result
+
+    def with_sharding(self, sharding: ShardingType) -> Array8B:
+        """
+        Returns a new Array8B with the specified sharding applied to component arrays.
+
+        This method creates a copy of the quantized array with sharding constraints
+        applied to the underlying weight and scale arrays, ensuring they are properly
+        distributed across devices.
+
+        Args:
+            sharding: A NamedSharding, PartitionSpec, or None. If PartitionSpec is provided,
+                     it will be used directly. For NamedSharding, both the mesh and spec
+                     are preserved.
+
+        Returns:
+            Array8B: A new instance with sharding applied to component arrays.
+        """
+        new_weight = _apply_sharding(self.weight, sharding)
+        new_scale = _apply_sharding(self.scale, sharding)
+
+        return dataclasses.replace(
+            self,
+            weight=new_weight,
+            scale=new_scale,
+            sharding=sharding,
         )
+
+    def reshard(self, sharding: ShardingType) -> Array8B:
+        """Alias for with_sharding for API consistency."""
+        return self.with_sharding(sharding)
+
+    @property
+    def is_sharded(self) -> bool:
+        """Returns True if this array has sharding information."""
+        return self.sharding is not None
 
     def delete(self):
         self.weight.delete()
         self.scale.delete()
+
+
+def _apply_sharding(array: Array, sharding: ShardingType) -> Array:
+    """Apply sharding constraint to an array if sharding is specified."""
+    if sharding is None:
+        return array
+
+    from eformer.escale import with_sharding_constraint
+
+    return with_sharding_constraint(array, sharding)
 
 
 ArrayType = Array | Array8B
@@ -196,6 +265,52 @@ def sqrt_8bit_x(primitive: Primitive, x: Array8B) -> ArrayType:
     return lax.sqrt(x)
 
 
+def matmul_bf16_int8_weight_only(
+    lhs_bf16: Array,  # (..., M, K), bfloat16
+    rhs_q_int8: Array,  # (K, N), int8
+    rhs_scale: Array,  # typically (K, 1) or (1, N) from quantize_int8
+) -> Array:
+    """
+    bf16 lhs @ int8 rhs (weight-only quantization).
+
+    We infer whether rhs_scale is per-row (K,1) or per-column (1,N)
+    and place the scale in the cheapest mathematically correct spot:
+
+      - per-column (1, N):  Y = (lhs @ W_q) * scale
+      - per-row    (K, 1):  Y = (lhs * scale^T) @ W_q
+
+    Anything else falls back to a generic dequantize-then-matmul path.
+    """
+    rhs_bf16 = rhs_q_int8.astype(jnp.bfloat16)
+    w_shape = rhs_q_int8.shape
+    s_shape = rhs_scale.shape
+
+    if rhs_q_int8.ndim == 2 and rhs_scale.ndim == 2:
+        K, N = w_shape
+
+        if s_shape == (1, N):
+            y = jnp.matmul(lhs_bf16, rhs_bf16, preferred_element_type=jnp.float32)
+
+            extra_dims = y.ndim - 2
+            scale = rhs_scale.reshape((1,) * extra_dims + (1, N))
+
+            y = y * scale
+            return y.astype(jnp.bfloat16)
+
+        if s_shape == (K, 1):
+            s_vec = rhs_scale.reshape((K,))
+            bcast_shape = (1,) * (lhs_bf16.ndim - 1) + (K,)
+            s_bcast = s_vec.reshape(bcast_shape)
+
+            lhs_scaled = lhs_bf16 * s_bcast
+            y = jnp.matmul(lhs_scaled, rhs_bf16, preferred_element_type=jnp.float32)
+            return y.astype(jnp.bfloat16)
+
+    rhs_deq = rhs_bf16 * rhs_scale.astype(jnp.bfloat16)
+    y = jnp.matmul(lhs_bf16, rhs_deq, preferred_element_type=jnp.float32)
+    return y.astype(jnp.bfloat16)
+
+
 @register("dot_general")
 def dot_general_8bit_lhs_rhs(primitive: Primitive, lhs: ArrayType, rhs: ArrayType, *args, **kwargs):
     """
@@ -213,6 +328,13 @@ def dot_general_8bit_lhs_rhs(primitive: Primitive, lhs: ArrayType, rhs: ArrayTyp
     Returns:
       The result of lax.dot_general operation.
     """
+    if isinstance(lhs, Array) and isinstance(rhs, Array8B):
+        return matmul_bf16_int8_weight_only(
+            lhs_bf16=lhs,
+            rhs_q_int8=rhs.weight,
+            rhs_scale=rhs.scale,
+        )
+
     if isinstance(lhs, Array8B):
         lhs = lhs.materialize()
     if isinstance(rhs, Array8B):
@@ -292,22 +414,42 @@ def transpose_8bit_operand(primitive: Primitive, operand: Array8B, *args, **kwar
     """
     Custom handler for JAX's transpose operation.
 
-    Materializes Array8B input before performing the operation.
-    Re-quantizes the result if the input was Array8B.
+    Transposes the underlying weight and scale arrays directly.
+    Preserves sharding from the original array.
 
     Args:
-
-      operand (ArrayType): The array to be transposed.
+      primitive: The JAX primitive being handled.
+      operand (Array8B): The array to be transposed.
       *args: Variable length argument list.
       **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      The result of lax.transpose operation, potentially re-quantized.
+      Array8B: The transposed array with sharding preserved.
     """
-    operand = operand.materialize()
-    operand = lax.transpose(operand, *args, **kwargs)
-    operand = Array8B.quantize(operand, dtype=operand.dtype)
-    return operand
+    if "permutation" in kwargs:
+        perm = kwargs["permutation"]
+    elif args:
+        perm = args[0]
+    else:
+        raise TypeError("transpose requires a `permutation` argument")
+
+    weight_t = lax.transpose(operand.weight, perm)
+    scale_t = lax.transpose(operand.scale, perm)
+
+    if operand.axis is None:
+        new_axis = None
+    else:
+        new_axis = tuple(perm[a] for a in operand.axis)
+
+    result = Array8B(
+        weight=weight_t,
+        scale=scale_t,
+        shape=weight_t.shape,
+        dtype=operand.dtype,
+        axis=new_axis,
+        sharding=operand.sharding,  # Preserve sharding
+    )
+    return result
 
 
 @register("conv_general_dilated")
@@ -405,27 +547,29 @@ def reshape_8bit_operand(primitive: Primitive, operand: Array8B, *args, **params
     """
     Custom handler for JAX's reshape operation.
 
-    This function handles reshaping for both regular arrays and Array8B quantized arrays.
-    It materializes ArrayNF4 input before reshaping and re-quantizes the result if the input was ArrayNF4.
+    This function handles reshaping for Array8B quantized arrays.
+    It materializes input before reshaping and re-quantizes the result.
+    Preserves sharding from the original array.
 
     Args:
       primitive (Primitive): The JAX primitive being handled.
-      operand (ArrayType): The array to be reshaped.
-      new_sizes (Tuple[int, ...]): The desired new shape of the array.
-      dimensions (Tuple[int, ...], optional): The order in which dimensions should be permuted before reshaping.
-      **kwargs: Additional keyword arguments for the reshape operation.
+      operand (Array8B): The array to be reshaped.
+      *args: Positional arguments for reshape.
+      **params: Keyword arguments/parameters for reshape.
 
     Returns:
-      ArrayType: The reshaped array, potentially re-quantized if the input was Array8B.
+      Array8B: The reshaped array, re-quantized with sharding preserved.
 
     Raises:
       ValueError: If the new shape is not compatible with the original array's size.
     """
-
     array = operand.materialize()
     subfuns, bind_params = primitive.get_bind_params(params)
     result = primitive.bind(*subfuns, array, *args, **bind_params)
     result = Array8B.quantize(result, dtype=operand.dtype)
+    # Preserve sharding from original operand
+    if operand.sharding is not None:
+        result = result.with_sharding(operand.sharding)
     return result
 
 
@@ -450,12 +594,28 @@ def concatenate_8bit_operands(primitive: Primitive, operands: tp.Sequence[ArrayT
 
 @register("broadcast_in_dim")
 def broadcast_in_dim_8bit_operand(primitive: Primitive, operand: Array8B, *args, **params) -> ArrayType:
-    """Handle broadcast_in_dim for Array8B."""
-    array = operand.materialize()
+    """Handle broadcast_in_dim for Array8B. Preserves sharding from the original array."""
     subfuns, bind_params = primitive.get_bind_params(params)
-    result = primitive.bind(*subfuns, array, *args, **bind_params)
-    result = Array8B.quantize(result, dtype=operand.dtype)
-    return result
+
+    shape = bind_params["shape"]
+    broadcast_dimensions = bind_params["broadcast_dimensions"]
+
+    weight_b = primitive.bind(*subfuns, operand.weight, *args, **bind_params)
+    scale_b = primitive.bind(*subfuns, operand.scale, *args, **bind_params)
+
+    if operand.axis is None:
+        new_axis = None
+    else:
+        new_axis = tuple(broadcast_dimensions[a] for a in operand.axis)
+
+    return Array8B(
+        weight=weight_b,
+        scale=scale_b,
+        shape=shape,
+        dtype=operand.dtype,
+        axis=new_axis,
+        sharding=operand.sharding,  # Preserve sharding
+    )
 
 
 @register("gather")

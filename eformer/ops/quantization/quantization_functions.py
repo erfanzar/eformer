@@ -110,7 +110,6 @@ def get_nf4():
             0.7229568362236023,
             1.0,
         ],
-        device=jax.devices("cpu")[0],
     )
 
 

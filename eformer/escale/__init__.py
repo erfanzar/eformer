@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from jax.sharding import NamedSharding, PartitionSpec
 
 from .helpers import (
     AutoShardingRule,
@@ -60,13 +61,17 @@ from .partition import (
     with_sharding_constraint,
 )
 
+lax_reshard = with_sharding_constraint
+
 __all__ = (
     "AutoShardingRule",
     "CompositeShardingRule",
     "MemoryConstrainedShardingRule",
     "MeshPartitionHelper",
+    "NamedSharding",
     "PartitionAxis",
     "PartitionManager",
+    "PartitionSpec",
     "ShapeBasedShardingRule",
     "ShardingAnalyzer",
     "ShardingRule",
@@ -93,6 +98,7 @@ __all__ = (
     "get_partition_spec",
     "get_shardings_with_structure",
     "get_submesh_device_index",
+    "lax_reshard",
     "make_shard_and_gather_fns",
     "match_partition_rules",
     "names_in_current_mesh",

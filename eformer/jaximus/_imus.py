@@ -477,7 +477,7 @@ class ImplicitArray(_ArrayBase):
 
         if aval is not None:
             if dtype is None:
-                self.dtype = aval.shape
+                self.dtype = aval.dtype
             elif dtype != aval.dtype:
                 warnings.warn(
                     f"ImplicitArray dtype {dtype} does not match materialization dtype {aval.dtype}",
