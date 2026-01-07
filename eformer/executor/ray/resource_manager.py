@@ -278,12 +278,18 @@ class RayResources:
 
         queue = multiprocessing.Queue()
         process = multiprocessing.Process(target=target_fn, args=(queue, args, kwargs))
+        timeout_s = float(os.getenv("EFORMER_SUBPROCESS_TIMEOUT_S", "1000000"))
         process.start()
-        process.join()
+        process.join(timeout=timeout_s)
+        if process.is_alive():
+            logger.error("Process timed out")
+            process.terminate()
+            process.join(timeout=10)
+            raise RuntimeError("Process timed out")
 
         logger.info("Process finished")
         try:
-            success, value = queue.get(timeout=int(1e6))
+            success, value = queue.get(timeout=5)
         except QueueEmpty as e:
             logger.error("Process timed out")
             process.terminate()
@@ -448,6 +454,33 @@ def available_cpu_cores() -> int:
         return os.cpu_count()
     except NotImplementedError:
         return 1
+
+
+def _safe_tpu_chips_per_host() -> int:
+    """Best-effort TPU chip count lookup with a safe fallback for non-TPU nodes."""
+    try:
+        count = TPUAcceleratorManager.get_current_node_num_accelerators()
+    except Exception:
+        return 0
+    return int(count or 0)
+
+
+def _safe_tpu_worker_count() -> int:
+    """Best-effort TPU worker count with a safe fallback for non-TPU drivers."""
+    try:
+        count = ray.util.accelerators.tpu.get_current_pod_worker_count()
+    except Exception:
+        return 1
+    return int(count) if count else 1
+
+
+def _safe_tpu_runtime_name() -> str:
+    """Best-effort TPU pod name with a stable fallback."""
+    try:
+        name = ray.util.accelerators.tpu.get_current_pod_name()
+    except Exception:
+        name = None
+    return name or str(uuid.uuid4())
 
 
 class ComputeResourceConfig(Protocol):
@@ -615,7 +648,7 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
     Attributes:
         core_count (int): Number of CPU cores to allocate. Defaults to all available cores.
         execution_env (RuntimeEnv): Ray runtime environment for dependencies and setup.
-        resource_name (str): Name identifier for the resource type (default: "GPU").
+        resource_name (str): Name identifier for the resource type (default: "CPU").
         runtime_name (str): Unique runtime identifier for this configuration.
         worker_count (int): Number of worker processes to spawn.
 
@@ -629,7 +662,7 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
 
     core_count: int = field(default_factory=available_cpu_cores)
     execution_env: RuntimeEnv = field(default_factory=RuntimeEnv)
-    resource_name: str = field(default="GPU")
+    resource_name: str = field(default="CPU")
     runtime_name: str = field(default_factory=uuid.uuid4)
     worker_count: int = 1
 
@@ -894,9 +927,9 @@ class TpuAcceleratorConfig(ComputeResourceConfig):
     pod_count: int = 1
     execution_env: RuntimeEnv = field(default_factory=RuntimeEnv)
     cpu_count: int = 2
-    chips_per_host: int = field(default_factory=TPUAcceleratorManager.get_current_node_num_accelerators)
-    worker_count: int = field(default_factory=ray.util.accelerators.tpu.get_current_pod_worker_count)
-    runtime_name: str = field(default_factory=ray.util.accelerators.tpu.get_current_pod_name)
+    chips_per_host: int = field(default_factory=_safe_tpu_chips_per_host)
+    worker_count: int = field(default_factory=_safe_tpu_worker_count)
+    runtime_name: str = field(default_factory=_safe_tpu_runtime_name)
     resource_name: str = field(default="TPU")
 
     def hardware_identifier(self) -> str:

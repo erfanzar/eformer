@@ -352,7 +352,6 @@ class RayExecutor:
                         MEGASCALE_NUM_SLICES=str(len(members)),
                         MEGASCALE_PORT=str(port),
                         MEGASCALE_SLICE_ID=str(slice_id),
-                        EXECUTOR_CALL_INDEX="0",
                         EXECUTOR_CALL_SLICE=str(slice_id),
                         TPU_SLICE_NAME=slice_infos[slice_id].slice_name,
                     )
@@ -361,16 +360,18 @@ class RayExecutor:
                 env_for_slice = {str(k): str(v) for k, v in env_for_slice.items()}
 
                 host_handles = ray.get(member.actor.get_all_actors_in_pool.remote())
-                host_futures = [
-                    h.run_remote_fn.remote(
-                        remote_fn,
-                        f_args=(),
-                        f_kwargs=kwargs,
-                        runtime_env=accelerator_config.execution_env,
-                        env=env_for_slice,
+                host_futures = []
+                for host_idx, handle in enumerate(host_handles):
+                    env_for_host = dict(env_for_slice, EXECUTOR_CALL_INDEX=str(host_idx))
+                    host_futures.append(
+                        handle.run_remote_fn.remote(
+                            remote_fn,
+                            f_args=(),
+                            f_kwargs=kwargs,
+                            runtime_env=accelerator_config.execution_env,
+                            env=env_for_host,
+                        )
                     )
-                    for h in host_handles
-                ]
                 per_slice_futures.append(host_futures)
 
             if flatten:
@@ -947,13 +948,13 @@ def _build_multislice_envs(
             - MEGASCALE_NUM_SLICES: Total number of slices
             - MEGASCALE_PORT: Coordinator port
             - MEGASCALE_SLICE_ID: This slice's ID (0-indexed)
-            - EXECUTOR_CALL_INDEX: Worker index within slice
             - EXECUTOR_CALL_SLICE: Same as MEGASCALE_SLICE_ID
             - TPU_SLICE_NAME: Name of this TPU slice
 
     Note:
         The first slice's IP address is used as the coordinator address.
         All values are converted to strings for environment compatibility.
+        EXECUTOR_CALL_INDEX is assigned per host when scheduling tasks.
     """
     envs = []
     coord_ip = slice_infos[0].ip_address
@@ -965,7 +966,6 @@ def _build_multislice_envs(
                 MEGASCALE_NUM_SLICES=str(len(slice_infos)),
                 MEGASCALE_PORT=str(coord_port),
                 MEGASCALE_SLICE_ID=str(i),
-                EXECUTOR_CALL_INDEX="0",
                 EXECUTOR_CALL_SLICE=str(i),
                 TPU_SLICE_NAME=si.slice_name,
             )
@@ -1137,9 +1137,9 @@ class TpuRemoteManager:
                     f_args=args,
                     f_kwargs=kwargs,
                     runtime_env=self.runtime_env,
-                    env=env,
+                    env=dict(env, EXECUTOR_CALL_INDEX=str(host_idx)),
                 )
-                for h in hosts
+                for host_idx, h in enumerate(hosts)
             ]
             outer_refs_per_slice.append(outer)
 
@@ -1210,9 +1210,9 @@ class TpuRemoteManager:
                     _class_method_entry,
                     f_args=payload,
                     runtime_env=self.runtime_env,
-                    env=env,
+                    env=dict(env, EXECUTOR_CALL_INDEX=str(host_idx)),
                 )
-                for h in hosts
+                for host_idx, h in enumerate(hosts)
             ]
             outer_refs_per_slice.append(outer)
 
@@ -1280,9 +1280,9 @@ class _BoundRemoteClass:
                         _class_method_entry,
                         f_args=payload,
                         runtime_env=self._manager.runtime_env,
-                        env=env,
+                        env=dict(env, EXECUTOR_CALL_INDEX=str(host_idx)),
                     )
-                    for h in hosts
+                    for host_idx, h in enumerate(hosts)
                 ]
                 outer_refs_per_slice.append(outer)
 
@@ -1359,9 +1359,9 @@ class _RemoteFunctionWrapper:
                         f_args=args,
                         f_kwargs=kwargs,
                         runtime_env=self._manager.runtime_env,
-                        env=env,
+                        env=dict(env, EXECUTOR_CALL_INDEX=str(host_idx)),
                     )
-                    for h in hosts
+                    for host_idx, h in enumerate(hosts)
                 ]
                 outer_refs_per_slice.append(outer)
             inner_per_slice = [ray.get(outer) for outer in outer_refs_per_slice]

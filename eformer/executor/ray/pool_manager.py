@@ -681,12 +681,13 @@ class SliceActor:
         import ray
 
         pod_name = None
+        ray_tpu = None
         try:
             from ray.util.accelerators import tpu as ray_tpu
 
             pod_name = ray_tpu.get_current_pod_name()
         except Exception:
-            pass
+            ray_tpu = None
         num_devices = None
         try:
             from ray._private.accelerators import TPUAcceleratorManager
@@ -694,10 +695,16 @@ class SliceActor:
             num_devices = TPUAcceleratorManager.get_current_node_num_accelerators()
         except Exception:
             pass
-        num_hosts = int(ray_tpu.get_current_pod_worker_count())
-        if os.getenv("EFORMER_MODERATE", "1") == "1":
+        num_hosts = 1
+        if ray_tpu is not None:
+            try:
+                num_hosts = int(ray_tpu.get_current_pod_worker_count())
+            except Exception:
+                num_hosts = 1
+        if os.getenv("EFORMER_MODERATE", "1") == "1" and pod_name:
             available_hosts = ray.cluster_resources().get(pod_name, None)
             if available_hosts is not None and num_hosts > available_hosts:
+                available_hosts = int(available_hosts)
                 num_devices = int(available_hosts)
                 real_num_devices = 4
                 print(

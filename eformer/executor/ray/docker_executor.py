@@ -260,7 +260,7 @@ def run_docker_multislice(
 ) -> list[Any]:
     """Run Docker containers across multiple slices.
 
-    Executes Docker containers in parallel across multiple compute slices,
+    Executes Docker containers in parallel across all hosts in the compute slices,
     typically used for distributed training or inference on TPU pods.
 
     Args:
@@ -275,9 +275,9 @@ def run_docker_multislice(
             RayExecutor.execute_multislice_resumable().
 
     Returns:
-        list[Any]: List of outputs from each slice's Docker container.
-            Length equals the number of slices. Each element is stdout
-            if capture_output is True, None otherwise.
+        list[Any]: List of outputs from each host's Docker container.
+            Length equals the number of hosts across all slices. Each element
+            is stdout if capture_output is True, None otherwise.
 
     Raises:
         RuntimeError: If any Docker container exits with a non-zero status.
@@ -291,12 +291,14 @@ def run_docker_multislice(
         ...     tpu_config,
         ...     max_retries=3
         ... )
-        >>> print(f"Got {len(outputs)} outputs from {tpu_config.num_slices} slices")
+        >>> print(f"Got {len(outputs)} outputs from all hosts")
     """
+    executor_kwargs.setdefault("flatten", True)
 
     def run_docker_with_slice_env() -> tuple[int, str, str]:
         """Run Docker with slice-specific environment variables."""
         slice_id = os.environ.get("EXECUTOR_CALL_SLICE", "0")
+        host_id = os.environ.get("EXECUTOR_CALL_INDEX", "0")
         slice_config = DockerConfig(
             image=docker_config.image,
             command=docker_config.command,
@@ -304,6 +306,7 @@ def run_docker_multislice(
             environment={
                 **(docker_config.environment or {}),
                 "EXECUTOR_CALL_SLICE": str(slice_id),
+                "EXECUTOR_CALL_INDEX": str(host_id),
             },
             network=docker_config.network,
             privileged=docker_config.privileged,
@@ -316,7 +319,7 @@ def run_docker_multislice(
 
         cmd = make_docker_run_command(slice_config)
 
-        logger.info(f"Running Docker on slice {slice_id}: {' '.join(cmd)}")
+        logger.info(f"Running Docker on slice {slice_id} host {host_id}: {' '.join(cmd)}")
 
         if capture_output:
             result = subprocess.run(
@@ -339,12 +342,19 @@ def run_docker_multislice(
         **executor_kwargs,
     )
 
+    if results and isinstance(results[0], list):
+        results = [item for sublist in results for item in sublist]
+
     outputs = []
-    for i, (returncode, stdout, stderr) in enumerate(results):
+    for i, result in enumerate(results):
+        try:
+            returncode, stdout, stderr = result
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Unexpected docker result at host index {i}: {result!r}") from exc
         if returncode != 0:
-            logger.error(f"Docker container on slice {i} failed with exit code {returncode}")
+            logger.error(f"Docker container on host {i} failed with exit code {returncode}")
             logger.error(f"stderr: {stderr}")
-            raise RuntimeError(f"Docker container on slice {i} failed: {stderr}")
+            raise RuntimeError(f"Docker container on host {i} failed: {stderr}")
         outputs.append(stdout if capture_output else None)
 
     return outputs

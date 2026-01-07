@@ -25,7 +25,6 @@ This module provides functionality for:
 import json
 import os
 import pty
-import shlex
 import shutil
 import subprocess
 import sys
@@ -381,7 +380,7 @@ def create_docker_run_command(
         "docker",
         "run",
         "-t" if foreground else "-d",
-        f"--name={shlex.quote(name)}",
+        f"--name={name}",
         "--privileged",
         "--shm-size=32gb",
         "--net=host",
@@ -393,12 +392,9 @@ def create_docker_run_command(
     ]
 
     for v in ["MEGASCALE_COORDINATOR_ADDRESS", "MEGASCALE_NUM_SLICES", "MEGASCALE_PORT", "MEGASCALE_SLICE_ID"]:
-        v = shlex.quote(str(v))
-        docker_command.extend(["-e", v])
+        docker_command.extend(["-e", str(v)])
 
     for k, v in env.items():
-        v = shlex.quote(str(v))
-        k = shlex.quote(str(k))
         docker_command.extend(["-e", f"{k}={v}"])
 
     docker_command.extend([image_id, *command])
