@@ -26,9 +26,20 @@ _STATE_DICT_REGISTRY: dict[Any, Any] = {}
 
 
 class _ErrorContext(threading.local):
-    """Context for deserialization error messages."""
+    """Thread-local context for tracking the path during deserialization.
+
+    This class maintains a stack of path components that are pushed/popped
+    as the deserialization traverses the nested structure. This enables
+    meaningful error messages that indicate where in the structure a
+    problem occurred.
+
+    Attributes:
+        path: List of path components representing the current location
+            in the nested structure being deserialized.
+    """
 
     def __init__(self):
+        """Initialize the error context with an empty path."""
         self.path = []
 
 
@@ -37,6 +48,24 @@ _error_context = _ErrorContext()
 
 @contextmanager
 def _record_path(name):
+    """Context manager to track the current path during deserialization.
+
+    This context manager pushes a path component onto the error context stack
+    when entering and pops it when exiting, enabling accurate error reporting
+    with full path information.
+
+    Args:
+        name: The name of the current path component (e.g., field name, key).
+
+    Yields:
+        None. The context manager manages the path stack internally.
+
+    Examples:
+        >>> with _record_path("layer1"):
+        ...     with _record_path("weights"):
+        ...         # current_path() would return "layer1/weights"
+        ...         pass
+    """
     try:
         _error_context.path.append(name)
         yield
@@ -59,13 +88,36 @@ def current_path():
 
 
 class _NamedTuple:
-    """Fake type marker for namedtuple for registry."""
+    """Sentinel type marker for namedtuple serialization registration.
+
+    This class is used as a key in the state dict registry to handle
+    namedtuple types uniformly, since namedtuples are created dynamically
+    by the namedtuple factory and don't share a common base class.
+    """
 
     pass
 
 
 def _is_namedtuple(x):
-    """Duck typing test for namedtuple factory-generated objects."""
+    """Check if an object is a namedtuple instance using duck typing.
+
+    Namedtuples are identified by being tuples that have a '_fields'
+    attribute containing the field names.
+
+    Args:
+        x: The object to check.
+
+    Returns:
+        bool: True if x appears to be a namedtuple instance, False otherwise.
+
+    Examples:
+        >>> from collections import namedtuple
+        >>> Point = namedtuple('Point', ['x', 'y'])
+        >>> _is_namedtuple(Point(1, 2))
+        True
+        >>> _is_namedtuple((1, 2))
+        False
+    """
     return isinstance(x, tuple) and hasattr(x, "_fields")
 
 
@@ -169,10 +221,32 @@ def register_serialization_state(ty, ty_to_state_dict, ty_from_state_dict, overr
 
 
 def _list_state_dict(xs: list[Any]) -> dict[str, Any]:
+    """Convert a list to a state dictionary representation.
+
+    Args:
+        xs: The list to convert.
+
+    Returns:
+        dict[str, Any]: Dictionary with string indices as keys and
+            serialized values.
+    """
     return {str(i): to_state_dict(x) for i, x in enumerate(xs)}
 
 
 def _restore_list(xs, state_dict: dict[str, Any]) -> list[Any]:
+    """Restore a list from its state dictionary representation.
+
+    Args:
+        xs: The target list providing structure information.
+        state_dict: Dictionary with string indices as keys containing
+            serialized values.
+
+    Returns:
+        list[Any]: Restored list with deserialized values.
+
+    Raises:
+        ValueError: If the state_dict size doesn't match the target list.
+    """
     if len(state_dict) != len(xs):
         raise ValueError(
             "The size of the list and the state dict do not match,"
@@ -187,6 +261,17 @@ def _restore_list(xs, state_dict: dict[str, Any]) -> list[Any]:
 
 
 def _dict_state_dict(xs: dict[str, Any]) -> dict[str, Any]:
+    """Convert a dictionary to a state dictionary representation.
+
+    Args:
+        xs: The dictionary to convert.
+
+    Returns:
+        dict[str, Any]: Dictionary with string keys and serialized values.
+
+    Raises:
+        ValueError: If dictionary keys don't have unique string representations.
+    """
     str_keys = {str(k) for k in xs.keys()}
     if len(str_keys) != len(xs):
         raise ValueError(f"Dict keys do not have a unique string representation: {str_keys} vs given: {xs}")
@@ -194,6 +279,18 @@ def _dict_state_dict(xs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _restore_dict(xs, states: dict[str, Any]) -> dict[str, Any]:
+    """Restore a dictionary from its state dictionary representation.
+
+    Args:
+        xs: The target dictionary providing structure information.
+        states: Dictionary containing serialized values.
+
+    Returns:
+        dict[str, Any]: Restored dictionary with deserialized values.
+
+    Raises:
+        ValueError: If target dict has keys not present in state dict.
+    """
     diff = set(map(str, xs.keys())).difference(states.keys())
     if diff:
         raise ValueError(
@@ -206,12 +303,36 @@ def _restore_dict(xs, states: dict[str, Any]) -> dict[str, Any]:
 
 
 def _namedtuple_state_dict(nt) -> dict[str, Any]:
+    """Convert a namedtuple to a state dictionary representation.
+
+    Args:
+        nt: The namedtuple instance to convert.
+
+    Returns:
+        dict[str, Any]: Dictionary with field names as keys and
+            serialized field values.
+    """
     return {key: to_state_dict(getattr(nt, key)) for key in nt._fields}
 
 
 def _restore_namedtuple(xs, state_dict: dict[str, Any]):
-    """Rebuild namedtuple from serialized dict."""
+    """Restore a namedtuple from its state dictionary representation.
 
+    Handles both the standard field-value format and the legacy format
+    with 'name', 'fields', and 'values' keys.
+
+    Args:
+        xs: The target namedtuple instance providing type information.
+        state_dict: Dictionary containing serialized field values.
+
+    Returns:
+        A new namedtuple instance of the same type as xs with
+        restored field values.
+
+    Raises:
+        ValueError: If field names in state_dict don't match the
+            namedtuple's fields.
+    """
     if set(state_dict.keys()) == {"name", "fields", "values"}:
         state_dict = {
             state_dict["fields"][str(i)]: state_dict["values"][str(i)] for i in range(len(state_dict["fields"]))
@@ -255,7 +376,21 @@ register_serialization_state(
 
 
 def _ndarray_to_bytes(arr) -> bytes:
-    """Save ndarray to simple msgpack encoding."""
+    """Serialize a numpy or JAX array to bytes using msgpack.
+
+    The array is serialized as a tuple of (shape, dtype_name, raw_bytes)
+    for efficient storage and reconstruction.
+
+    Args:
+        arr: A numpy ndarray or JAX Array to serialize.
+
+    Returns:
+        bytes: Msgpack-encoded bytes containing shape, dtype, and array data.
+
+    Raises:
+        ValueError: If the array has object or structured dtypes which
+            are not supported for serialization.
+    """
     if isinstance(arr, jax.Array):
         arr = np.array(arr)
     if arr.dtype.hasobject or arr.dtype.isalignedstruct:
@@ -265,7 +400,17 @@ def _ndarray_to_bytes(arr) -> bytes:
 
 
 def _dtype_from_name(name: str):
-    """Handle JAX bfloat16 dtype correctly."""
+    """Convert a dtype name string to a numpy/JAX dtype object.
+
+    Handles special cases like JAX's bfloat16 which is not a standard
+    numpy dtype.
+
+    Args:
+        name: The dtype name as a string (may be bytes for msgpack compatibility).
+
+    Returns:
+        A numpy dtype or JAX dtype object corresponding to the name.
+    """
     if name == b"bfloat16":
         return jax.numpy.bfloat16
     else:
@@ -273,13 +418,33 @@ def _dtype_from_name(name: str):
 
 
 def _ndarray_from_bytes(data: bytes) -> np.ndarray:
-    """Load ndarray from simple msgpack encoding."""
+    """Deserialize a numpy array from msgpack-encoded bytes.
+
+    Reconstructs the array from the (shape, dtype_name, raw_bytes) tuple
+    format used by _ndarray_to_bytes.
+
+    Args:
+        data: Msgpack-encoded bytes containing array shape, dtype, and data.
+
+    Returns:
+        np.ndarray: The reconstructed numpy array.
+    """
     shape, dtype_name, buffer = msgpack.unpackb(data, raw=True)
     return np.frombuffer(buffer, dtype=_dtype_from_name(dtype_name), count=-1, offset=0).reshape(shape, order="C")
 
 
 class _MsgpackExtType(enum.IntEnum):
-    """Messagepack custom type ids."""
+    """MessagePack extension type identifiers for custom serialization.
+
+    These integer codes are used to identify custom types when encoding
+    and decoding MessagePack data, allowing proper handling of numpy arrays,
+    complex numbers, and numpy scalars.
+
+    Attributes:
+        ndarray: Extension type code for numpy/JAX arrays.
+        native_complex: Extension type code for Python complex numbers.
+        npscalar: Extension type code for numpy scalar values.
+    """
 
     ndarray = 1
     native_complex = 2
@@ -346,7 +511,20 @@ MAX_CHUNK_SIZE = 2**30
 
 
 def _np_convert_in_place(d):
-    """Convert any jax devicearray leaves to numpy arrays in place."""
+    """Convert JAX arrays to numpy arrays in a nested structure, in place.
+
+    Recursively traverses dictionaries and converts any JAX Array leaves
+    to numpy arrays. This is necessary because msgpack cannot directly
+    serialize JAX arrays.
+
+    Args:
+        d: A dictionary or JAX array to convert.
+
+    Returns:
+        The input with JAX arrays converted to numpy arrays. For dictionaries,
+        the conversion is done in place; for direct JAX arrays, a new numpy
+        array is returned.
+    """
     if isinstance(d, dict):
         for k, v in d.items():
             if isinstance(v, jax.Array):
@@ -359,15 +537,44 @@ def _np_convert_in_place(d):
 
 
 def _tuple_to_dict(tpl):
+    """Convert a tuple to a dictionary with string index keys.
+
+    Args:
+        tpl: A tuple to convert.
+
+    Returns:
+        dict: Dictionary mapping string indices to tuple values.
+    """
     return {str(x): y for x, y in enumerate(tpl)}
 
 
 def _dict_to_tuple(dct):
+    """Convert a string-index dictionary back to a tuple.
+
+    Args:
+        dct: Dictionary with string indices as keys ("0", "1", ...).
+
+    Returns:
+        tuple: Tuple of values in index order.
+    """
     return tuple(dct[str(i)] for i in range(len(dct)))
 
 
 def _chunk(arr) -> dict[str, Any]:
-    """Convert array to a canonical dictionary of chunked arrays."""
+    """Split a large array into chunks for serialization.
+
+    Arrays larger than MAX_CHUNK_SIZE are split into multiple smaller
+    chunks to avoid msgpack size limitations and memory issues.
+
+    Args:
+        arr: A numpy array to chunk.
+
+    Returns:
+        dict[str, Any]: A dictionary containing:
+            - "__msgpack_chunked_array__": True (marker)
+            - "shape": Dictionary representation of the original shape
+            - "chunks": Dictionary of array chunks
+    """
     chunksize = max(1, int(MAX_CHUNK_SIZE / arr.dtype.itemsize))
     data = {"__msgpack_chunked_array__": True, "shape": _tuple_to_dict(arr.shape)}
     flatarr = arr.reshape(-1)
@@ -377,7 +584,20 @@ def _chunk(arr) -> dict[str, Any]:
 
 
 def _unchunk(data: dict[str, Any]):
-    """Convert canonical dictionary of chunked arrays back into array."""
+    """Reconstruct an array from its chunked dictionary representation.
+
+    Args:
+        data: Dictionary containing chunked array data with keys:
+            - "__msgpack_chunked_array__": True (marker)
+            - "shape": Dictionary representation of the original shape
+            - "chunks": Dictionary of array chunks
+
+    Returns:
+        np.ndarray: The reconstructed array with original shape.
+
+    Raises:
+        ValueError: If the chunked array marker is not present.
+    """
     if "__msgpack_chunked_array__" not in data:
         raise ValueError("Expected chunked array marker '__msgpack_chunked_array__'.")
     shape = _dict_to_tuple(data["shape"])
@@ -386,7 +606,18 @@ def _unchunk(data: dict[str, Any]):
 
 
 def _chunk_array_leaves_in_place(d):
-    """Convert oversized array leaves to safe chunked form in place."""
+    """Recursively chunk oversized arrays in a nested structure.
+
+    Traverses dictionaries and replaces any numpy arrays exceeding
+    MAX_CHUNK_SIZE with their chunked dictionary representation.
+
+    Args:
+        d: A dictionary or numpy array to process.
+
+    Returns:
+        The input with oversized arrays replaced by chunked representations.
+        For dictionaries, modification is done in place.
+    """
     if isinstance(d, dict):
         for k, v in d.items():
             if isinstance(v, np.ndarray):
@@ -401,7 +632,19 @@ def _chunk_array_leaves_in_place(d):
 
 
 def _unchunk_array_leaves_in_place(d):
-    """Convert chunked array leaves back into array leaves, in place."""
+    """Recursively reconstruct arrays from chunked representations.
+
+    Traverses dictionaries and replaces any chunked array dictionaries
+    (identified by the "__msgpack_chunked_array__" marker) with
+    reconstructed numpy arrays.
+
+    Args:
+        d: A dictionary potentially containing chunked array representations.
+
+    Returns:
+        The input with chunked representations replaced by numpy arrays.
+        For dictionaries, modification is done in place.
+    """
     if isinstance(d, dict):
         if "__msgpack_chunked_array__" in d:
             return _unchunk(d)

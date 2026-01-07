@@ -116,10 +116,27 @@ class UniversalPath(ABC):
 
     @abstractmethod
     def read_bytes(self) -> bytes:
+        """Read binary content from the path.
+
+        Returns:
+            The binary content of the file.
+
+        Raises:
+            FileNotFoundError: If the path doesn't exist.
+            ValueError: If trying to read from a directory.
+        """
         pass
 
     @abstractmethod
     def write_bytes(self, data: bytes) -> None:
+        """Write binary content to the path.
+
+        Args:
+            data: Binary data to write.
+
+        Raises:
+            ValueError: If trying to write to a directory.
+        """
         pass
 
     @abstractmethod
@@ -137,96 +154,229 @@ class UniversalPath(ABC):
 
     @abstractmethod
     def is_dir(self) -> bool:
+        """Check if the path is a directory.
+
+        Returns:
+            True if the path is a directory, False otherwise.
+        """
         pass
 
     @abstractmethod
     def is_file(self) -> bool:
+        """Check if the path is a file.
+
+        Returns:
+            True if the path is a file, False otherwise.
+        """
         pass
 
     @abstractmethod
     def iterdir(self) -> Iterator["UniversalPath"]:
+        """Iterate over the contents of a directory.
+
+        Yields:
+            UniversalPath objects for each item in the directory.
+
+        Raises:
+            NotADirectoryError: If the path is not a directory.
+        """
         pass
 
     @abstractmethod
     def glob(self, pattern: str, recursive: bool = False) -> Iterator["UniversalPath"]:
+        """Find paths matching a glob pattern.
+
+        Args:
+            pattern: Glob pattern to match (e.g., "*.txt", "**/*.py").
+            recursive: If True, search recursively through subdirectories.
+
+        Yields:
+            UniversalPath objects for each matching path.
+        """
         pass
 
     @abstractmethod
     def __truediv__(self, other) -> "UniversalPath":
+        """Join path with another path component using / operator.
+
+        Args:
+            other: Path component to append.
+
+        Returns:
+            New UniversalPath with the combined path.
+        """
         pass
 
     @abstractmethod
     def __str__(self) -> str:
+        """Return string representation of the path.
+
+        Returns:
+            String representation of the path.
+        """
         pass
 
     @abstractmethod
     def as_posix(self) -> str:
-        """Return the string representation with forward slashes"""
+        """Return the string representation with forward slashes.
+
+        Returns:
+            Path string with forward slashes as separators.
+        """
         pass
 
     @abstractmethod
     def stem(self) -> str:
-        """Return the final path component without its suffix"""
+        """Return the final path component without its suffix.
+
+        Returns:
+            The stem of the final path component.
+
+        Example:
+            >>> path = LocalPath("/data/model.tar.gz")
+            >>> path.stem()
+            'model.tar'
+        """
         pass
 
     @abstractmethod
     def suffixes(self) -> list[str]:
-        """Return a list of the path's file suffixes"""
+        """Return a list of the path's file suffixes.
+
+        Returns:
+            List of suffixes including the leading dots.
+
+        Example:
+            >>> path = LocalPath("/data/model.tar.gz")
+            >>> path.suffixes()
+            ['.tar', '.gz']
+        """
         pass
 
     @abstractmethod
     def with_name(self, name: str) -> "UniversalPath":
-        """Return a new path with the name changed"""
+        """Return a new path with the name changed.
+
+        Args:
+            name: New name for the final path component.
+
+        Returns:
+            New path with the name replaced.
+        """
         pass
 
     @abstractmethod
     def with_suffix(self, suffix: str) -> "UniversalPath":
-        """Return a new path with the suffix changed"""
+        """Return a new path with the suffix changed.
+
+        Args:
+            suffix: New suffix (including leading dot).
+
+        Returns:
+            New path with the suffix replaced.
+        """
         pass
 
     @abstractmethod
     def with_stem(self, stem: str) -> "UniversalPath":
-        """Return a new path with the stem changed"""
+        """Return a new path with the stem changed.
+
+        Args:
+            stem: New stem for the final path component.
+
+        Returns:
+            New path with the stem replaced.
+        """
         pass
 
     @abstractmethod
     def parts(self) -> tuple[str, ...]:
-        """Return a tuple of the path components"""
+        """Return a tuple of the path components.
+
+        Returns:
+            Tuple of individual path components.
+        """
         pass
 
     @abstractmethod
     def relative_to(self, other: "UniversalPath") -> "UniversalPath":
-        """Return a relative path from other to this path"""
+        """Return a relative path from other to this path.
+
+        Args:
+            other: Base path to compute relative path from.
+
+        Returns:
+            Relative path from other to this path.
+
+        Raises:
+            ValueError: If this path is not relative to other.
+        """
         pass
 
     @abstractmethod
     def is_absolute(self) -> bool:
-        """Return True if the path is absolute"""
+        """Return True if the path is absolute.
+
+        Returns:
+            True if the path is absolute, False otherwise.
+        """
         pass
 
     @abstractmethod
     def resolve(self) -> "UniversalPath":
-        """Make the path absolute, resolving any symlinks"""
+        """Make the path absolute, resolving any symlinks.
+
+        Returns:
+            Absolute path with symlinks resolved.
+        """
         pass
 
     @abstractmethod
     def rmdir(self) -> None:
-        """Remove this directory (must be empty)"""
+        """Remove this directory.
+
+        The directory must be empty.
+
+        Raises:
+            OSError: If the directory is not empty.
+            NotADirectoryError: If the path is not a directory.
+        """
         pass
 
     @abstractmethod
     def unlink(self, missing_ok: bool = False) -> None:
-        """Remove this file or symbolic link"""
+        """Remove this file or symbolic link.
+
+        Args:
+            missing_ok: If True, don't raise error if file doesn't exist.
+
+        Raises:
+            FileNotFoundError: If missing_ok is False and file doesn't exist.
+        """
         pass
 
     @abstractmethod
     def rename(self, target: "UniversalPath") -> "UniversalPath":
-        """Rename this path to the given target"""
+        """Rename this path to the given target.
+
+        Args:
+            target: New path name.
+
+        Returns:
+            New path object pointing to target.
+        """
         pass
 
     @abstractmethod
     def stat(self) -> dict[str, Any]:
-        """Return file statistics"""
+        """Return file statistics.
+
+        Returns:
+            Dictionary containing file metadata such as size, mtime, etc.
+
+        Raises:
+            FileNotFoundError: If the path doesn't exist.
+        """
         pass
 
 
@@ -849,7 +999,21 @@ class MLUtilPath(PathManager):
             raise ValueError(f"Unsupported format: {format}")
 
     def save_dict(self, data: dict[str, Any], path: str | UniversalPath, format: str = "json") -> None:  # noqa:A002
-        """Save dictionary in various formats"""
+        """Save dictionary in various formats.
+
+        Args:
+            data: Dictionary to save. Values can include JAX arrays which will
+                  be converted to lists for JSON format.
+            path: Destination path (local or GCS).
+            format: Serialization format ('json' or 'pickle').
+
+        Raises:
+            ValueError: If format is not supported.
+
+        Example:
+            >>> manager.save_dict({"weights": [1, 2, 3]}, "config.json")
+            >>> manager.save_dict(complex_data, "gs://bucket/data.pkl", "pickle")
+        """
         if isinstance(path, str):
             path = self(path)
 
@@ -864,7 +1028,23 @@ class MLUtilPath(PathManager):
             raise ValueError(f"Unsupported format: {format}")
 
     def load_dict(self, path: str | UniversalPath, format: str = "json") -> dict[str, Any]:  # noqa:A002
-        """Load dictionary from various formats"""
+        """Load dictionary from various formats.
+
+        Args:
+            path: Source path (local or GCS).
+            format: Serialization format ('json' or 'pickle').
+
+        Returns:
+            Loaded dictionary.
+
+        Raises:
+            ValueError: If format is not supported.
+            FileNotFoundError: If path doesn't exist.
+
+        Example:
+            >>> config = manager.load_dict("config.json")
+            >>> data = manager.load_dict("gs://bucket/data.pkl", "pickle")
+        """
         if isinstance(path, str):
             path = self(path)
 
@@ -878,7 +1058,14 @@ class MLUtilPath(PathManager):
             raise ValueError(f"Unsupported format: {format}")
 
     def _make_json_serializable(self, obj):
-        """Convert JAX arrays and other non-serializable objects to JSON-safe types"""
+        """Convert JAX arrays and other non-serializable objects to JSON-safe types.
+
+        Args:
+            obj: Object to convert. Can be a dict, list, tuple, array, or scalar.
+
+        Returns:
+            JSON-serializable version of the object.
+        """
         if isinstance(obj, jax.Array | np.ndarray):
             return obj.tolist()
         elif isinstance(obj, dict):

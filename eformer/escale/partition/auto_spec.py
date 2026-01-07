@@ -223,8 +223,33 @@ def optimize_sharding_for_memory(
     max_memory_per_device: int | None = None,
     names: list[str] | None = None,
 ) -> dict[str, PartitionSpec]:
-    """
-    Optimizes sharding strategy to fit within memory constraints.
+    """Optimize sharding strategy to fit within per-device memory constraints.
+
+    Generates partition specifications that ensure each array's per-device
+    memory footprint stays within the specified limit. Arrays smaller than
+    the limit remain unsharded for efficiency.
+
+    Args:
+        pytree: A PyTree of arrays to generate partition specs for.
+        mesh: The JAX mesh to shard across. If None, uses the current
+            context's mesh.
+        max_memory_per_device: Maximum bytes per device. Arrays larger than
+            this will be sharded to fit. If None, no memory constraint is
+            applied (defaults to auto_partition_spec behavior).
+        names: List of mesh axis names to consider for sharding.
+            If None, uses all axis names from the mesh.
+
+    Returns:
+        A dictionary mapping paths to PartitionSpecs optimized for the
+        memory constraint.
+
+    Example:
+        >>> # Optimize for 8GB per device
+        >>> specs = optimize_sharding_for_memory(
+        ...     params,
+        ...     mesh=mesh,
+        ...     max_memory_per_device=8 * 1024**3
+        ... )
     """
     if mesh is None:
         mesh = get_incontext_mesh()
@@ -246,8 +271,27 @@ def validate_sharding_config(
     partition_specs: dict[str, PartitionSpec],
     mesh: Mesh | None = None,
 ) -> list[str]:
-    """
-    Validates sharding configuration and returns list of warnings/errors.
+    """Validate sharding configuration and return any issues found.
+
+    Checks that partition specifications are compatible with array shapes
+    and mesh configuration. Identifies potential problems like:
+    - Array dimensions not divisible by mesh axis sizes
+    - Small arrays that might not benefit from sharding
+
+    Args:
+        pytree: A PyTree of arrays to validate.
+        partition_specs: Dictionary mapping paths to PartitionSpecs.
+        mesh: The JAX mesh to validate against. If None, uses the
+            current context's mesh.
+
+    Returns:
+        A list of issue descriptions. Empty list means no issues found.
+
+    Example:
+        >>> issues = validate_sharding_config(params, specs, mesh)
+        >>> if issues:
+        ...     for issue in issues:
+        ...         print(f"Warning: {issue}")
     """
     if mesh is None:
         mesh = get_incontext_mesh()
@@ -276,8 +320,32 @@ def convert_sharding_strategy(
     new_mesh: Mesh,
     strategy: str = "preserve_balance",
 ) -> dict[str, PartitionSpec]:
-    """
-    Converts sharding strategy between different mesh configurations.
+    """Convert sharding strategy between different mesh configurations.
+
+    When migrating models between different mesh topologies (e.g., from
+    8 to 16 devices), this function adapts partition specifications to
+    maintain similar parallelism characteristics.
+
+    Args:
+        array: Reference array used to determine valid new partition specs.
+        old_partition_specs: Dictionary of current partition specifications.
+        old_mesh: The original mesh configuration.
+        new_mesh: The target mesh configuration to convert to.
+        strategy: Conversion strategy. Currently supports:
+            - "preserve_balance": Maintains similar parallelization factor
+              by using the old spec's total split factor as the minimum
+              sharding size for the new spec.
+
+    Returns:
+        A dictionary of new partition specifications adapted to new_mesh.
+
+    Example:
+        >>> # Convert from 8-device to 16-device mesh
+        >>> old_mesh = create_mesh((2, 4), ('dp', 'tp'))
+        >>> new_mesh = create_mesh((4, 4), ('dp', 'tp'))
+        >>> new_specs = convert_sharding_strategy(
+        ...     array, old_specs, old_mesh, new_mesh
+        ... )
     """
     new_specs = {}
 

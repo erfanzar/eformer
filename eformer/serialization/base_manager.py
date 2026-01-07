@@ -94,6 +94,35 @@ class CheckpointManager:
         gcs_bucket: str | None = None,
         gcs_credentials_path: str | None = None,
     ):
+        """Initialize the CheckpointManager.
+
+        Args:
+            checkpoint_dir: Directory for saving/loading checkpoints. Can be a local
+                path or a GCS path (gs://bucket/path).
+            enable: Whether checkpointing is enabled. If None, auto-detection is used
+                based on process index during save operations.
+            float_dtype: Default data type for floating point arrays when saving.
+                Defaults to jnp.bfloat16 for memory efficiency.
+            save_optimizer_state: Whether to include optimizer state in checkpoints.
+                Defaults to True.
+            verbose: Enable verbose logging output. Defaults to False.
+            gcs_bucket: Optional Google Cloud Storage bucket name for cloud storage.
+                If provided, enables GCS integration.
+            gcs_credentials_path: Optional path to GCS service account credentials JSON.
+                If None and gcs_bucket is set, uses default credentials.
+
+        Example:
+            >>> manager = CheckpointManager(
+            ...     checkpoint_dir="/checkpoints",
+            ...     float_dtype=jnp.float32,
+            ...     verbose=True
+            ... )
+            >>> # Or with GCS
+            >>> manager = CheckpointManager(
+            ...     checkpoint_dir="gs://my-bucket/checkpoints",
+            ...     gcs_bucket="my-bucket"
+            ... )
+        """
         self.float_dtype = float_dtype
         self.save_optimizer_state = save_optimizer_state
         self.checkpoint_dir = checkpoint_dir

@@ -64,11 +64,46 @@ from .constraints import get_corrected_named_sharding, with_sharding_constraint
 
 
 def hash_fn(self) -> int:
+    """Compute a hash value for an object based on its dictionary values.
+
+    Creates a hash by concatenating string representations of hashable
+    attribute values (int, float, bool, dict, list) and computing an
+    MD5 hash of the result.
+
+    Args:
+        self: The object to hash (bound method).
+
+    Returns:
+        An integer hash value derived from the object's attributes.
+    """
     shu = "".join(str(cu) for cu in self.__dict__.values() if isinstance(cu, float | int | float | bool | dict | list))
     return get_safe_hash_int(shu)
 
 
 def get_safe_hash_int(text, algorithm="md5"):
+    """Convert text to an integer hash using the specified algorithm.
+
+    Provides a safe way to generate integer hashes from strings, useful
+    for creating hashable keys from complex objects.
+
+    Args:
+        text: The text to hash. Will be converted to string if not already.
+        algorithm: Hash algorithm to use. Defaults to "md5". Supports any
+            algorithm available in hashlib (e.g., "sha256", "sha1").
+
+    Returns:
+        An integer representation of the hash digest.
+
+    Raises:
+        ValueError: If the specified algorithm is not supported by hashlib.
+        Exception: If any other error occurs during hash generation.
+
+    Example:
+        >>> get_safe_hash_int("hello world")
+        309817674445039181685702831361671
+        >>> get_safe_hash_int("hello world", algorithm="sha256")
+        ...  # Different integer value
+    """
     try:
         text_str = str(text)
         hash_object = getattr(hashlib, algorithm)(text_str.encode())
@@ -450,6 +485,37 @@ class PartitionManager(PyTree):
         dynamic_axes: DynamicShardingAxes | None = NOT_GIVEN,
         shape: tp.Sequence[int] = NOT_GIVEN,
     ) -> PartitionSpec:
+        """Resolve semantic axis names to a PartitionSpec.
+
+        Converts semantic axis names (like BATCH, LENGTH, HEAD) into a
+        concrete PartitionSpec using the configured PartitionAxis mapping.
+        Supports dynamic mode detection based on array shape.
+
+        Args:
+            axes: Sequence of semantic axis names, or a DynamicShardingAxes
+                tuple containing both axes and mode.
+            mode: Runtime mode (MODE_TRAIN, MODE_DECODE) or an integer
+                dimension index for dynamic mode detection. When an integer
+                is provided, mode is inferred based on whether shape[mode] == 1.
+            dynamic_axes: Alternative way to provide axes and mode together
+                as a DynamicShardingAxes named tuple.
+            shape: Array shape, required when mode is an integer for
+                dynamic mode detection.
+
+        Returns:
+            A PartitionSpec mapping semantic axes to mesh dimensions.
+
+        Raises:
+            ValueError: If axes/mode are not provided and dynamic_axes is
+                also not provided, or if shape is missing for dynamic mode.
+
+        Example:
+            >>> manager = PartitionManager(paxis=paxis)
+            >>> # Direct specification
+            >>> spec = manager.resolve([BATCH, LENGTH, HEAD], mode=MODE_TRAIN)
+            >>> # Dynamic mode detection (decode if dim 1 has size 1)
+            >>> spec = manager.resolve([BATCH, LENGTH, HEAD], mode=1, shape=x.shape)
+        """
         if isinstance(axes, type) and issubclass(axes, tuple) and hasattr(axes, "_fields"):
             dynamic_axes = axes
             axes = NOT_GIVEN

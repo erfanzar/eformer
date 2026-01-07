@@ -254,14 +254,26 @@ def tree_serialize_leaves(
 
 
 def _fs_paths_from_key_paths(checkpoint_dir, leaf_path):
-    """Convert dotted key paths to filesystem paths.
+    """Convert dotted key paths to filesystem paths for TensorStore serialization.
+
+    Takes a PyTree of dotted key paths (e.g., "model.layers.0.weight") and converts
+    each to a filesystem path by replacing dots with directory separators.
 
     Args:
-        checkpoint_dir: Base directory for checkpoint.
-        leaf_path: PyTree of dotted key paths.
+        checkpoint_dir: Base directory for checkpoint. All paths will be relative
+            to this directory.
+        leaf_path: PyTree of dotted key paths as strings. Each string represents
+            the path to a leaf in the original pytree.
 
     Returns:
-        PyTree with filesystem paths corresponding to the key paths.
+        PyTree with the same structure where each leaf is replaced by its
+        corresponding filesystem path string.
+
+    Example:
+        >>> leaf_path = {"a": "model.layer1.weight", "b": "model.layer1.bias"}
+        >>> paths = _fs_paths_from_key_paths("/checkpoint", leaf_path)
+        >>> # Returns: {"a": "/checkpoint/model/layer1/weight",
+        >>> #          "b": "/checkpoint/model/layer1/bias"}
     """
 
     def path_from_key_path(key_path):
@@ -275,13 +287,24 @@ def _fs_paths_from_key_paths(checkpoint_dir, leaf_path):
 
 
 def _fully_replicated_sharding(mesh: Mesh | None) -> Sharding:
-    """Create a fully replicated sharding.
+    """Create a fully replicated sharding for arrays.
+
+    Creates a sharding specification that replicates data across all devices.
+    If a mesh is provided, uses NamedSharding with empty PartitionSpec.
+    Otherwise, falls back to single device sharding on the first device.
 
     Args:
-        mesh: Optional JAX mesh. If None, uses single device sharding.
+        mesh: Optional JAX mesh for distributed computation. If None, uses
+            single device sharding on jax.devices()[0].
 
     Returns:
-        Sharding that replicates data across all devices.
+        Sharding specification that replicates data:
+        - NamedSharding with PartitionSpec() if mesh is provided
+        - SingleDeviceSharding if mesh is None
+
+    Note:
+        Fully replicated shardings are commonly used for small arrays that
+        should be identical across all devices, such as biases or scalars.
     """
     if mesh is None:
         return SingleDeviceSharding(jax.devices()[0])
@@ -290,14 +313,29 @@ def _fully_replicated_sharding(mesh: Mesh | None) -> Sharding:
 
 
 def _sharding_from_leaf(leaf, mesh) -> Sharding | None:
-    """Determine appropriate sharding for a leaf value.
+    """Determine appropriate sharding for a leaf value in a PyTree.
+
+    Examines a leaf value and returns the most appropriate sharding specification:
+    1. If the leaf already has a sharding attribute, use that
+    2. If it's an array-like object, use fully replicated sharding
+    3. If it's a scalar type, use fully replicated sharding
+    4. Otherwise, return None and log a warning
 
     Args:
-        leaf: Leaf value from a pytree.
-        mesh: JAX mesh for distributed computation.
+        leaf: Leaf value from a pytree. Can be a JAX array, numpy array,
+            scalar, or other types.
+        mesh: JAX mesh for distributed computation. Used to create
+            NamedSharding for replicated arrays.
 
     Returns:
-        Appropriate Sharding for the leaf, or None if type is unknown.
+        Appropriate Sharding for the leaf:
+        - The leaf's existing sharding if it has one
+        - Fully replicated sharding for arrays and scalars
+        - None for unknown types (logged as warning)
+
+    Note:
+        This function is used during checkpoint loading to determine how
+        to shard arrays that don't have explicit sharding specifications.
     """
     if hasattr(leaf, "sharding") and leaf.sharding is not None:
         return leaf.sharding

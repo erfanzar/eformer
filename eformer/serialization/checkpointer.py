@@ -750,22 +750,48 @@ class Checkpointer:
         temporary: bool = False,
         write_index: bool = True,
     ) -> str:
-        """
-        Save a PyTree under a specific prefix with treedef preserved (structured checkpoint).
+        """Save a PyTree under a specific prefix with treedef preserved (structured checkpoint).
+
+        This method provides structured checkpoint saving that preserves the exact PyTree
+        structure definition (treedef), enabling reconstruction of the original structure
+        during loading without a template.
 
         Args:
-            tree: PyTree to save.
-            prefix: Namespace/prefix (e.g., "tx", "model").
-            step: Training step for metadata.json.
-            destination: Optional subdir under base_path. Defaults to f"run-{step}".
-            mesh: Optional JAX Mesh for sharding context.
-            dtype: Optional dtype cast for floating values before saving.
-            extras: Optional extra metadata to store in checkpoint_metadata.json.
-            temporary: If True, mark checkpoint as temporary in metadata.json.
-            write_index: Whether to (re)write the TensorStore index.
+            tree: PyTree to save. Can contain JAX arrays, numpy arrays, and other
+                serializable Python objects.
+            prefix: Namespace/prefix for organizing the saved tree (e.g., "model",
+                "optimizer", "tx"). Required and must be a non-empty string.
+            step: Training step number for metadata. Used to generate default
+                destination name (f"run-{step}") and stored in metadata.json.
+            destination: Optional subdirectory name under base_path. If None and step
+                is provided, defaults to f"run-{step}". If both are None, saves
+                directly to base_path.
+            mesh: Optional JAX Mesh for sharding context. Used when do_all_gather
+                is performed to preserve proper device placement.
+            dtype: Optional dtype to cast floating point arrays to before saving.
+                If None, preserves original dtypes.
+            extras: Optional dictionary of extra metadata to store in
+                checkpoint_metadata.json alongside standard fields.
+            temporary: If True, marks this checkpoint as temporary in metadata.json.
+                Temporary checkpoints are subject to automatic cleanup. Defaults to False.
+            write_index: Whether to write/update the TensorStore index file. Set to
+                False only if you're managing the index externally. Defaults to True.
 
         Returns:
-            The checkpoint directory path (base_path/destination).
+            The full checkpoint directory path (base_path/destination) where the
+            checkpoint was saved.
+
+        Raises:
+            ValueError: If prefix is empty or not a string.
+
+        Example:
+            >>> path = checkpointer.save_pytree(
+            ...     tree=model_state,
+            ...     prefix="model",
+            ...     step=1000,
+            ...     extras={"learning_rate": 0.001}
+            ... )
+            >>> print(f"Saved to: {path}")
         """
         if not prefix or not isinstance(prefix, str):
             raise ValueError("A non-empty string prefix is required")

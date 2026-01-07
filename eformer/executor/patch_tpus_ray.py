@@ -85,11 +85,46 @@ _LOGGING_LEVELS: dict[str, int] = {
 
 
 def _resources_json(d: dict) -> str:
+    """Convert a dictionary to a compact JSON string for Ray resource specification.
+
+    Args:
+        d: Dictionary containing resource key-value pairs.
+
+    Returns:
+        str: JSON string with no extra whitespace, suitable for command-line arguments.
+
+    Example:
+        >>> _resources_json({"TPU": 4, "CPU": 8})
+        '{"TPU":4,"CPU":8}'
+    """
     return json.dumps(d, separators=(",", ":"))
 
 
 class ColorFormatter(logging.Formatter):
+    """Custom log formatter that adds color coding to log messages based on level.
+
+    Formats log messages with ANSI color codes to make different log levels
+    visually distinct in terminal output. Colors are defined in the LEVEL_COLORS
+    dictionary and include support for DEBUG, INFO, WARNING, ERROR, and CRITICAL levels.
+
+    Attributes:
+        Inherits all attributes from logging.Formatter.
+
+    Example:
+        >>> handler = logging.StreamHandler()
+        >>> handler.setFormatter(ColorFormatter())
+        >>> logger.addHandler(handler)
+    """
+
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record with color coding.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            str: Formatted log message with ANSI color codes.
+        """
         orig_levelname = record.levelname
         color = LEVEL_COLORS.get(record.levelname, COLORS["RESET"])
         record.levelname = f"{color}{record.levelname:<8}{COLORS['RESET']}"
@@ -101,12 +136,40 @@ class ColorFormatter(logging.Formatter):
 
 
 class LazyLogger:
+    """A lazily-initialized logger that defers setup until first use.
+
+    This class provides a logger that is not initialized until the first
+    log message is emitted, reducing startup overhead when logging may
+    not be used. It uses ColorFormatter for colorized terminal output.
+
+    Attributes:
+        _name: Name for the logger.
+        _level: Logging level (defaults to LOGGING_LEVEL_ED environment variable).
+        _logger: The underlying logging.Logger instance, initialized on first use.
+
+    Example:
+        >>> logger = LazyLogger("my_module")
+        >>> logger.info("This message triggers initialization")
+    """
+
     def __init__(self, name: str, level: int | None = None):
+        """Initialize a LazyLogger.
+
+        Args:
+            name: Name for the logger, typically the module name.
+            level: Optional logging level. Defaults to LOGGING_LEVEL_ED
+                environment variable or INFO if not set.
+        """
         self._name = name
         self._level = level or _LOGGING_LEVELS[os.getenv("LOGGING_LEVEL_ED", "INFO")]
         self._logger: logging.Logger | None = None
 
     def _ensure_initialized(self) -> None:
+        """Initialize the underlying logger if not already done.
+
+        Creates a logging.Logger with a StreamHandler and ColorFormatter.
+        Disables propagation to avoid duplicate messages.
+        """
         if self._logger is not None:
             return
 
@@ -121,6 +184,20 @@ class LazyLogger:
         self._logger = logger
 
     def __getattr__(self, name: str) -> tp.Callable:
+        """Proxy attribute access to the underlying logger.
+
+        Intercepts calls to logging methods (debug, info, warning, etc.)
+        and ensures the logger is initialized before delegating.
+
+        Args:
+            name: Name of the attribute being accessed.
+
+        Returns:
+            Callable: A wrapped logging method.
+
+        Raises:
+            AttributeError: If the attribute is not a valid logging method.
+        """
         if name in _LOGGING_LEVELS or name.upper() in _LOGGING_LEVELS or name in ("exception", "log"):
 
             @wraps(getattr(logging.Logger, name))
@@ -133,18 +210,72 @@ class LazyLogger:
 
 
 def get_logger(name: str, level: int | None = None) -> LazyLogger:
+    """Create a LazyLogger instance with the specified name and level.
+
+    Factory function for creating LazyLogger instances. Provides a simple
+    interface for obtaining loggers throughout the application.
+
+    Args:
+        name: Name for the logger, typically the module name (__name__).
+        level: Optional logging level override. If None, uses the
+            LOGGING_LEVEL_ED environment variable or defaults to INFO.
+
+    Returns:
+        LazyLogger: A lazily-initialized logger instance.
+
+    Example:
+        >>> logger = get_logger(__name__)
+        >>> logger.info("Application started")
+    """
     return LazyLogger(name, level)
 
 
 class RayManager:
-    """Manages Ray operations including starting, stopping, and verifying clusters."""
+    """Manages Ray operations including starting, stopping, and verifying clusters.
+
+    This class provides comprehensive functionality for managing Ray clusters
+    on TPU infrastructure, including:
+
+    - Finding and validating the Ray executable
+    - Starting head and worker nodes with proper resource configuration
+    - Stopping individual nodes or entire clusters
+    - Verifying cluster health and TPU resource availability
+    - Running commands locally or remotely via SSH
+
+    Attributes:
+        logger: Logger instance for this class.
+        ray_path: Path to the Ray executable.
+
+    Example:
+        >>> manager = RayManager()
+        >>> manager.start_head_node("10.0.0.1", {"TPU": 4})
+        >>> manager.start_worker_node("10.0.0.1", "10.0.0.2", {"TPU": 4})
+        >>> manager.verify_cluster("10.0.0.1", expected_tpu_count=8)
+    """
 
     def __init__(self):
+        """Initialize the RayManager.
+
+        Locates the Ray executable and sets up logging. Raises FileNotFoundError
+        if Ray cannot be found in the system.
+        """
         self.logger = logging.getLogger(__name__)
         self.ray_path = self._find_ray_executable()
 
     def _find_ray_executable(self) -> pathlib.Path:
-        """Return the absolute path to 'ray' inside the current venv (or system)."""
+        """Return the absolute path to 'ray' inside the current venv or system.
+
+        Searches for the Ray executable in the following order:
+        1. RAY_EXECUTABLE_PATH environment variable
+        2. Same directory as the Python executable
+        3. System PATH
+
+        Returns:
+            pathlib.Path: Absolute path to the Ray executable.
+
+        Raises:
+            FileNotFoundError: If Ray executable cannot be located.
+        """
         if ray_path := os.getenv("RAY_EXECUTABLE_PATH"):
             path = pathlib.Path(ray_path).expanduser().resolve()
             self.logger.debug(f"Using RAY_EXECUTABLE_PATH: {path}")
@@ -172,7 +303,28 @@ class RayManager:
         capture_output: bool = False,
         remote_ip: str | None = None,
     ) -> bool | str:
-        """Run a command locally or remotely with optional output capture."""
+        """Run a command locally or remotely with optional output capture.
+
+        Executes shell commands either on the local machine or on a remote
+        machine via SSH. Supports sudo elevation and output capture.
+
+        Args:
+            command: Command to execute, as a string or list of arguments.
+            use_sudo: If True, prepend 'sudo' to the command.
+            check: If True, raise exception on non-zero exit code.
+            capture_output: If True, return stdout; otherwise return success bool.
+            remote_ip: If provided, execute command on this remote host via SSH.
+
+        Returns:
+            Union[bool, str]: If capture_output is True, returns stdout as string.
+                Otherwise, returns True if command succeeded, False if it failed.
+
+        Example:
+            >>> manager.run_command(["ls", "-la"])
+            True
+            >>> manager.run_command("hostname", capture_output=True, remote_ip="10.0.0.1")
+            'worker-1'
+        """
         if isinstance(command, list):
             cmd_str = " ".join([str(c) for c in command])
         else:
@@ -226,7 +378,17 @@ class RayManager:
             return False if not capture_output else ""
 
     def is_ray_running(self, ip: str) -> bool:
-        """Check if Ray is already running on a node."""
+        """Check if Ray is already running on a node.
+
+        Determines if Ray processes are running on the specified IP address
+        by checking for 'ray::IDLE' processes via ps command.
+
+        Args:
+            ip: IP address of the node to check.
+
+        Returns:
+            bool: True if Ray is running on the node, False otherwise.
+        """
         local_ip = IPManager.get_local_ip()
 
         if local_ip == ip:
@@ -246,7 +408,22 @@ class RayManager:
             return result
 
     def start_head_node(self, head_ip: str, resources: dict[str, Any]) -> bool:
-        """Start Ray head node."""
+        """Start Ray head node with specified resources.
+
+        Initializes the Ray head node on the specified IP address. If Ray is
+        already running on the node, it will be stopped first.
+
+        Args:
+            head_ip: IP address for the head node.
+            resources: Dictionary of custom resources to advertise (e.g., {"TPU": 4}).
+
+        Returns:
+            bool: True if the head node started successfully, False otherwise.
+
+        Note:
+            The head node will listen on port 6379 and start the dashboard
+            on 0.0.0.0 to allow remote access.
+        """
         self.logger.info(f"Starting Ray head node on {head_ip}")
         local_ip = IPManager.get_local_ip()
 
@@ -276,7 +453,21 @@ class RayManager:
         return True
 
     def start_worker_node(self, head_ip: str, worker_ip: str, resources: dict[str, Any]) -> bool:
-        """Start Ray worker node."""
+        """Start Ray worker node and connect it to the head node.
+
+        Initializes a Ray worker node on the specified IP and connects it
+        to the existing head node. If Ray is already running on the worker,
+        it will be stopped first.
+
+        Args:
+            head_ip: IP address of the Ray head node to connect to.
+            worker_ip: IP address for the worker node.
+            resources: Dictionary of custom resources to advertise (e.g., {"TPU": 4}).
+
+        Returns:
+            bool: True if the worker node started and connected successfully,
+                False otherwise.
+        """
         self.logger.info(f"Starting Ray worker on {worker_ip}")
         local_ip = IPManager.get_local_ip()
 
@@ -303,7 +494,16 @@ class RayManager:
             return False
 
     def stop_node(self, ip: str) -> bool:
-        """Stop Ray on a specific node."""
+        """Stop Ray on a specific node.
+
+        Stops all Ray processes on the specified IP address.
+
+        Args:
+            ip: IP address of the node to stop Ray on.
+
+        Returns:
+            bool: True if Ray was stopped successfully, False otherwise.
+        """
         self.logger.info(f"Stopping Ray on {ip}...")
         local_ip = IPManager.get_local_ip()
 
@@ -313,14 +513,37 @@ class RayManager:
             return self.run_command(f"{self.ray_path} stop", remote_ip=ip)
 
     def stop_cluster(self, ips: list[str]) -> None:
-        """Stop Ray cluster on all nodes."""
+        """Stop Ray cluster on all nodes.
+
+        Stops Ray processes on all nodes in the provided list.
+
+        Args:
+            ips: List of IP addresses of nodes in the cluster.
+        """
         self.logger.info("Stopping Ray on all nodes...")
         for ip in ips:
             self.stop_node(ip)
         self.logger.info("Ray cluster stopped on all nodes.")
 
     def verify_cluster(self, head_ip: str, expected_tpu_count: int, allow_head_only: bool = False) -> bool:
-        """Verify Ray cluster setup."""
+        """Verify Ray cluster setup and TPU resource availability.
+
+        Connects to the Ray cluster and verifies that the expected number
+        of TPU cores are registered. Allows a 10% tolerance for TPU detection.
+
+        Args:
+            head_ip: IP address of the Ray head node.
+            expected_tpu_count: Expected number of TPU cores across all nodes.
+            allow_head_only: If True, allow verification to pass for head-only
+                nodes with zero TPU resources.
+
+        Returns:
+            bool: True if verification passed, False otherwise.
+
+        Note:
+            Creates a temporary Python script to perform verification,
+            which is cleaned up after execution.
+        """
         self.logger.info("Verifying Ray cluster setup...")
         if allow_head_only and expected_tpu_count == 0:
             self.logger.info("Head-only node detected (no TPU resources)")
@@ -392,11 +615,36 @@ ray.shutdown()
 
 
 class IPManager:
-    """Manages IP address operations and configurations."""
+    """Manages IP address operations and configurations.
+
+    Provides static methods for retrieving local and external IP addresses,
+    reading IP configurations from YAML files, and testing SSH connectivity
+    to cluster nodes.
+
+    This class is designed for managing network configurations in distributed
+    TPU/Ray clusters where nodes need to communicate with each other.
+
+    Example:
+        >>> local_ip = IPManager.get_local_ip()
+        >>> external_ip = IPManager.get_external_ip()
+        >>> IPManager.read_ips_from_yaml("cluster_config.yaml")
+        >>> IPManager.test_ssh_connectivity(["10.0.0.1", "10.0.0.2"])
+    """
 
     @staticmethod
     def get_external_ip() -> str:
-        """Get the external IP address of the machine."""
+        """Get the external IP address of the machine.
+
+        Queries multiple public IP detection services to determine the
+        machine's external IP address.
+
+        Returns:
+            str: External IP address, or an error message if detection fails.
+
+        Note:
+            Tries ipify.org, ipinfo.io, and checkip.amazonaws.com in sequence,
+            using the first successful response.
+        """
         urls = ["https://api.ipify.org", "https://ipinfo.io/ip", "https://checkip.amazonaws.com"]
 
         logger = logging.getLogger(__name__)
@@ -417,7 +665,13 @@ class IPManager:
 
     @staticmethod
     def get_local_ip() -> str:
-        """Get the local IP address of the machine."""
+        """Get the local IP address of the machine.
+
+        Retrieves the primary local IP address using the 'hostname -I' command.
+
+        Returns:
+            str: Local IP address, or '127.0.0.1' if detection fails.
+        """
         logger = logging.getLogger(__name__)
 
         try:
@@ -431,7 +685,25 @@ class IPManager:
 
     @staticmethod
     def read_ips_from_yaml(yaml_file: str) -> bool:
-        """Read IPs from YAML file."""
+        """Read IP addresses from a YAML configuration file.
+
+        Parses a YAML file containing 'internal_ips' and 'external_ips' lists
+        and updates the global INTERNAL_IPS and EXTERNAL_IPS variables.
+
+        Args:
+            yaml_file: Path to the YAML configuration file.
+
+        Returns:
+            bool: True if IPs were successfully read, False on error.
+
+        Expected YAML format:
+            internal_ips:
+              - 10.0.0.1
+              - 10.0.0.2
+            external_ips:
+              - 35.192.1.1
+              - 35.192.1.2
+        """
         global INTERNAL_IPS, EXTERNAL_IPS
         logger = logging.getLogger(__name__)
 
@@ -454,7 +726,21 @@ class IPManager:
 
     @staticmethod
     def test_ssh_connectivity(ips: list[str]) -> bool:
-        """Test SSH connectivity to all nodes."""
+        """Test SSH connectivity to all nodes in the cluster.
+
+        Attempts to connect to each IP address via SSH and execute a simple
+        command to verify connectivity.
+
+        Args:
+            ips: List of IP addresses to test.
+
+        Returns:
+            bool: True if all connections succeeded, False if any failed.
+
+        Note:
+            Uses the SSH_USER global variable for authentication. Connections
+            use StrictHostKeyChecking=no and a 5-second timeout.
+        """
         logger = logging.getLogger(__name__)
         logger.info("Testing SSH connectivity to all nodes...")
         all_good = True
@@ -496,14 +782,48 @@ class IPManager:
 
 
 class ClusterManager:
-    """Manages TPU cluster setup and configuration."""
+    """Manages TPU cluster setup and configuration.
+
+    Provides high-level cluster management operations including setup of
+    multi-node Ray clusters on TPU infrastructure, handling both head
+    and worker nodes, and managing self-job mode for individual machines.
+
+    Attributes:
+        logger: Logger instance for this class.
+        ray_manager: RayManager instance for low-level Ray operations.
+
+    Example:
+        >>> ray_manager = RayManager()
+        >>> cluster_manager = ClusterManager(ray_manager)
+        >>> cluster_manager.setup_cluster(use_external=False)
+    """
 
     def __init__(self, ray_manager: RayManager):
+        """Initialize the ClusterManager.
+
+        Args:
+            ray_manager: RayManager instance to use for Ray operations.
+        """
         self.logger = logging.getLogger(__name__)
         self.ray_manager = ray_manager
 
     def setup_cluster(self, use_external: bool) -> bool:
-        """Set up Ray cluster."""
+        """Set up a complete Ray cluster with head and worker nodes.
+
+        Initializes a Ray cluster across multiple nodes, starting the head
+        node on the first IP and worker nodes on remaining IPs. Stops any
+        existing Ray processes before starting.
+
+        Args:
+            use_external: If True, use external IPs; otherwise use internal IPs.
+
+        Returns:
+            bool: True if cluster was set up successfully, False otherwise.
+
+        Note:
+            Uses global TPU_VERSION, TPU_SLICE_SIZE, and TPU_CORES_PER_HOST
+            variables for resource configuration.
+        """
         ips = EXTERNAL_IPS if use_external else INTERNAL_IPS
         head_ip = ips[0]
         worker_ips = ips[1:]
@@ -555,7 +875,25 @@ class ClusterManager:
         return True
 
     def setup_self_job_node(self, args) -> int:
-        """Set up a single node in self-job mode."""
+        """Set up a single node in self-job mode.
+
+        Configures the current machine as either a head or worker node based
+        on its IP address and provided arguments. Useful for distributed setups
+        where each node independently joins the cluster.
+
+        Args:
+            args: Namespace containing command-line arguments including:
+                - external: Whether to use external IPs
+                - internal_ips: Comma-separated internal IPs
+                - head_node_ip: IP of external head node (optional)
+                - head_only: Run as head-only without TPU resources
+                - num_slices: Number of TPU slices
+                - verify: Whether to verify cluster after setup
+                - stop: Stop Ray instead of starting
+
+        Returns:
+            int: Exit code (0 for success, 1 for failure).
+        """
         using_external = args.external or args.internal_ips is None
         local_ip = IPManager.get_external_ip() if using_external else IPManager.get_local_ip()
         external_head_ip = args.head_node_ip
@@ -662,11 +1000,30 @@ class ClusterManager:
 
 
 class ArgumentParser:
-    """Handles command-line argument parsing."""
+    """Handles command-line argument parsing for the Ray TPU patcher.
+
+    Provides static methods to parse and validate command-line arguments
+    for setting up and managing Ray clusters on TPU infrastructure.
+
+    The parser supports multiple argument groups:
+    - General options (logging level, log file)
+    - Cluster configuration (external IPs, TPU version, slice size)
+    - IP configuration (config file, IP lists, head node)
+    - Operation modes (stop, verify, test-ssh, self-job)
+    """
 
     @staticmethod
     def parse_arguments():
-        """Parse command line arguments."""
+        """Parse command-line arguments for Ray TPU cluster setup.
+
+        Returns:
+            argparse.Namespace: Parsed arguments containing all configuration
+                options for cluster setup and management.
+
+        Note:
+            Uses argparse.ArgumentDefaultsHelpFormatter to display default
+            values in the help text.
+        """
         parser = argparse.ArgumentParser(
             description="Ray TPU Cluster Setup for TPU Slices",
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -724,7 +1081,18 @@ class ArgumentParser:
 
 
 def main():
-    """Main entry point."""
+    """Main entry point for the Ray TPU cluster patcher.
+
+    Parses command-line arguments and performs the requested operation:
+    - Set up a complete cluster across multiple nodes
+    - Set up a single node in self-job mode
+    - Test SSH connectivity
+    - Stop an existing cluster
+    - Verify cluster health
+
+    Returns:
+        int: Exit code (0 for success, 1 for failure).
+    """
     args = ArgumentParser.parse_arguments()
 
     logger = get_logger("RayPatcher")

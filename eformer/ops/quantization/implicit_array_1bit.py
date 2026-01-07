@@ -94,10 +94,32 @@ class Array1B(ImplicitArray):
         axis: int | tuple[int] | None = None,
     ):
         """
-        Initializes the `Array1B` object by quantizing the input array.
+        Create an Array1B by quantizing the input array.
+
+        Packs the input array containing values {-1, 0, 1} into a compact 2-bit
+        per value format, storing 4 values per byte.
 
         Args:
-          array (jax.Array): The input array to be quantized.
+            array (jax.Array): The input array to be quantized. Should contain
+                integer values in {-1, 0, 1} for ternary or {-1, 1} for binary.
+                The first dimension must be a multiple of 4.
+            dtype (jnp.dtype | None): The dtype to use for materialization.
+                Defaults to the input array's dtype.
+            axis (int | tuple[int] | None): The quantization axis.
+                Defaults to -1 (last axis).
+
+        Returns:
+            Array1B: A new Array1B instance containing the packed weights.
+
+        Raises:
+            ValueError: If the first dimension is not a multiple of 4.
+
+        Example:
+            >>> import jax.numpy as jnp
+            >>> from eformer.ops.quantization import Array1B
+            >>> # Create ternary weights
+            >>> weights = jnp.array([[-1, 0, 1, 1], [1, -1, 0, 0]])
+            >>> quantized = Array1B.quantize(weights.astype(jnp.int8))
         """
         if axis is None:
             axis = -1
@@ -118,6 +140,14 @@ class Array1B(ImplicitArray):
         return unpack_weights_1bit(self.weight, self.dtype).reshape(self.shape)
 
     def delete(self):
+        """
+        Delete the underlying weight array to free memory.
+
+        Note:
+            This method attempts to delete both weight and scale attributes,
+            but Array1B only has weight. The scale.delete() call may raise
+            an AttributeError as Array1B doesn't have a scale attribute.
+        """
         self.weight.delete()
         self.scale.delete()
 
@@ -127,6 +157,20 @@ ArrayType = Array | Array1B | int | float | bool
 
 @register("lt")
 def lt_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType, **kwargs):
+    """
+    Custom handler for JAX's less-than comparison operation.
+
+    Materializes Array1B inputs before performing the comparison.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): First operand for comparison.
+        y (ArrayType): Second operand for comparison.
+        **kwargs: Additional keyword arguments for the lt operation.
+
+    Returns:
+        jax.Array: Boolean array with element-wise comparison results.
+    """
     if isinstance(x, Array1B):
         x = x.materialize()
     if isinstance(y, Array1B):
@@ -136,6 +180,20 @@ def lt_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType, **kwargs):
 
 @register("convert_element_type")
 def convert_element_type_1bit_operand_pos(primitive: Primitive, operand: Array1B, new_dtype: tp.Any) -> ArrayType:
+    """
+    Custom handler for JAX's convert_element_type operation (positional args).
+
+    For Array1B, updates the stored dtype without actual conversion.
+    The conversion happens lazily during materialization.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array1B): The array to convert.
+        new_dtype (Any): The target dtype.
+
+    Returns:
+        ArrayType: The array with updated dtype metadata.
+    """
     if isinstance(operand, Array1B):
         operand.dtype = new_dtype
         return operand
@@ -145,6 +203,20 @@ def convert_element_type_1bit_operand_pos(primitive: Primitive, operand: Array1B
 
 @register("convert_element_type")
 def convert_element_type_1bit_operand_kw(primitive: Primitive, operand: Array1B, **kwargs) -> ArrayType:
+    """
+    Custom handler for JAX's convert_element_type operation (keyword args).
+
+    For Array1B, updates the stored dtype without actual conversion.
+    The conversion happens lazily during materialization.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array1B): The array to convert.
+        **kwargs: Keyword arguments including 'new_dtype'.
+
+    Returns:
+        ArrayType: The array with updated dtype metadata.
+    """
     new_dtype = kwargs.get("new_dtype", jnp.bfloat16)
     if isinstance(operand, Array1B):
         operand.dtype = new_dtype
@@ -155,6 +227,19 @@ def convert_element_type_1bit_operand_kw(primitive: Primitive, operand: Array1B,
 
 @register("integer_pow")
 def integer_pow_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
+    """
+    Custom handler for JAX's integer power operation (positional args).
+
+    Materializes Array1B inputs before performing the power operation.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Base array.
+        y (ArrayType): Exponent array.
+
+    Returns:
+        ArrayType: Result of x raised to the power y.
+    """
     if isinstance(x, Array1B):
         x = x.materialize()
     if isinstance(y, Array1B):
@@ -164,6 +249,19 @@ def integer_pow_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> Arr
 
 @register("integer_pow")
 def integer_pow_1bit_x(primitive: Primitive, x: ArrayType, **kwargs) -> ArrayType:
+    """
+    Custom handler for JAX's integer power operation (keyword args).
+
+    Materializes Array1B input before performing the power operation.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Base array.
+        **kwargs: Keyword arguments including 'y' for exponent (default: 2).
+
+    Returns:
+        ArrayType: Result of x raised to the power y.
+    """
     y = kwargs.get("y", 2)
     if isinstance(x, Array1B):
         x = x.materialize()
@@ -172,6 +270,19 @@ def integer_pow_1bit_x(primitive: Primitive, x: ArrayType, **kwargs) -> ArrayTyp
 
 @register("div")
 def div_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
+    """
+    Custom handler for JAX's division operation.
+
+    Materializes Array1B inputs before performing element-wise division.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Dividend array.
+        y (ArrayType): Divisor array.
+
+    Returns:
+        ArrayType: Result of element-wise division x / y.
+    """
     if isinstance(x, Array1B):
         x = x.materialize()
     if isinstance(y, Array1B):
@@ -181,6 +292,18 @@ def div_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
 
 @register("sqrt")
 def sqrt_1bit_x(primitive: Primitive, x: Array1B) -> ArrayType:
+    """
+    Custom handler for JAX's square root operation.
+
+    Materializes Array1B input before computing element-wise square root.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (Array1B): Input array.
+
+    Returns:
+        ArrayType: Element-wise square root of the input.
+    """
     x = x.materialize()
     return lax.sqrt(x)
 
@@ -348,7 +471,21 @@ def max_1bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType, *args, **kwarg
 
 
 @register("div")
-def _(primitive: Primitive, x: ArrayType, y: ArrayType) -> tp.Any:
+def div_1bit_xy_fallback(primitive: Primitive, x: ArrayType, y: ArrayType) -> tp.Any:
+    """
+    Fallback handler for JAX's division operation.
+
+    Materializes Array1B inputs before performing element-wise division.
+    This is a duplicate registration to handle additional dispatch cases.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Dividend array.
+        y (ArrayType): Divisor array.
+
+    Returns:
+        Any: Result of element-wise division x / y.
+    """
     if isinstance(x, Array1B):
         x = x.materialize()
     if isinstance(y, Array1B):
@@ -448,7 +585,20 @@ def concatenate_1bit_operands(primitive: Primitive, operands: tp.Sequence[ArrayT
 
 @register("broadcast_in_dim")
 def broadcast_in_dim_1bit_operand(primitive: Primitive, operand: Array1B, *args, **params) -> ArrayType:
-    """Handle broadcast_in_dim for Array1B."""
+    """
+    Custom handler for JAX's broadcast_in_dim operation.
+
+    Materializes Array1B input, performs broadcasting, and re-quantizes the result.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array1B): The array to broadcast.
+        *args: Positional arguments for the broadcast operation.
+        **params: Keyword parameters including shape and broadcast_dimensions.
+
+    Returns:
+        ArrayType: The broadcasted array, re-quantized as Array1B.
+    """
     array = operand.materialize()
     subfuns, bind_params = primitive.get_bind_params(params)
     result = primitive.bind(*subfuns, array, *args, **bind_params)
@@ -458,7 +608,20 @@ def broadcast_in_dim_1bit_operand(primitive: Primitive, operand: Array1B, *args,
 
 @register("gather")
 def gather_1bit_operand(primitive: Primitive, operand: Array1B, *args, **kwargs) -> ArrayType:
-    """Handle gather for Array1B."""
+    """
+    Custom handler for JAX's gather operation.
+
+    Materializes Array1B input before performing index-based gathering.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array1B): The source array to gather from.
+        *args: Positional arguments including start_indices.
+        **kwargs: Keyword arguments for the gather operation.
+
+    Returns:
+        ArrayType: The gathered values as a regular JAX array.
+    """
     array = operand.materialize()
     result = jax.lax.gather(array, *args, **kwargs)
     return result
@@ -467,7 +630,36 @@ def gather_1bit_operand(primitive: Primitive, operand: Array1B, *args, **kwargs)
 @ste
 def straight_through_1bit(weights: jax.Array, axis: int | None = None):
     """
-    Straight-through 1BIT emulator.
+    Straight-through estimator for 1-bit quantization.
+
+    Quantizes weights to 1-bit format in the forward pass, but passes gradients
+    straight through (unchanged) in the backward pass. This enables training
+    with quantization awareness while maintaining gradient flow.
+
+    Args:
+        weights (jax.Array): Input weights to quantize. Should be suitable for
+            1-bit representation (values will be mapped to {-1, 0, 1}).
+        axis (int | None): The axis along which to quantize.
+            Defaults to None (uses -1, the last axis).
+
+    Returns:
+        jax.Array: Materialized quantized weights with the same shape as input.
+            Forward pass returns quantized values, backward pass passes
+            gradients through unchanged.
+
+    Example:
+        >>> import jax
+        >>> import jax.numpy as jnp
+        >>> from eformer.ops.quantization import straight_through_1bit
+        >>>
+        >>> # Use in a training step
+        >>> @jax.jit
+        ... def forward(params, x):
+        ...     w = straight_through_1bit(params['w'])
+        ...     return x @ w
+        >>>
+        >>> # Gradients flow through despite quantization
+        >>> grad_fn = jax.grad(lambda p, x: forward(p, x).sum())
     """
 
     return Array1B.quantize(weights, axis=axis).materialize()

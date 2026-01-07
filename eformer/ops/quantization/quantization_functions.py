@@ -12,6 +12,54 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+Low-level Quantization Functions.
+
+This module provides core quantization and dequantization functions for various
+bit-widths including NF4 (4-bit NormalFloat), INT8, and 1-bit formats. It also
+includes TPU-optimized Pallas kernels for efficient matrix multiplication with
+quantized weights.
+
+Key Functions:
+    Quantization/Dequantization:
+        - quantize_int8 / dequantize_int8: 8-bit integer quantization with scaling
+        - quantize_and_pack_nf4 / dequantize_nf4: NF4 block-wise quantization
+        - pack_weights_1bit / unpack_weights_1bit: 1-bit ternary weight packing
+
+    TPU Kernels:
+        - bmm_nf4: Pallas kernel for NF4 batch matrix multiplication
+        - bmm_nf4_transpose: Transposed variant for backward passes
+        - nf4_matmul: High-level wrapper for TPU-optimized matmul
+
+    Configuration:
+        - is_kernel_available(): Check if TPU kernels are available
+        - nf4_use_kernel(): Context manager for kernel mode control
+
+    Utilities:
+        - get_nf4(): Get NF4 lookup table
+        - nf4xf32_to_f32(): Polynomial approximation for NF4 dequantization
+        - i8tou8, u4toi4, i4tou4: Bit conversion utilities
+
+Environment Variables:
+    USE_NF4_KERNEL_TPU: Set to "0", "false", or "off" to disable TPU kernels.
+        Default is enabled ("1").
+
+Example:
+    >>> import jax.numpy as jnp
+    >>> from eformer.ops.quantization.quantization_functions import (
+    ...     quantize_int8, dequantize_int8,
+    ...     quantize_and_pack_nf4, dequantize_nf4
+    ... )
+    >>>
+    >>> # INT8 quantization
+    >>> weights = jnp.ones((128, 256))
+    >>> quants, scales = quantize_int8(weights, axis=-1)
+    >>> reconstructed = dequantize_int8(quants, scales)
+    >>>
+    >>> # NF4 quantization
+    >>> packed, absmax = quantize_and_pack_nf4(weights, block_size=64)
+    >>> reconstructed = dequantize_nf4(packed, absmax, block_size=64)
+"""
 
 import functools
 import os
@@ -89,7 +137,24 @@ def nf4_use_kernel(value: bool):
 
 
 def get_nf4():
-    """Get NF4 lookup table, creating it lazily to avoid JAX init at import time."""
+    """
+    Get the NF4 (4-bit NormalFloat) lookup table.
+
+    Creates the lookup table lazily to avoid triggering JAX initialization
+    at import time. The NF4 format uses 16 values optimized for Gaussian
+    distributions, providing better accuracy than uniform quantization for
+    neural network weights.
+
+    Returns:
+        jax.Array: A 16-element float32 array containing the NF4 codebook
+            values ranging from -1.0 to 1.0. The values are symmetric around
+            zero and optimized for normally distributed data.
+
+    Note:
+        The codebook values are derived from the quantiles of a standard
+        normal distribution, making NF4 particularly effective for neural
+        network weights which tend to follow Gaussian distributions.
+    """
 
     return jnp.asarray(
         [
@@ -138,37 +203,98 @@ def nf4xf32_to_f32(x):
 
 
 # Bit operation utilities
-sr = jax.lax.shift_right_logical
-sl = jax.lax.shift_left
-ba = jax.lax.bitwise_and
+sr = jax.lax.shift_right_logical  # Logical right shift (zero-fill)
+sl = jax.lax.shift_left  # Left shift
+ba = jax.lax.bitwise_and  # Bitwise AND
 
 
 def i8tou8(x):
-    """Convert int8 to uint8."""
+    """
+    Convert signed int8 to unsigned uint8.
+
+    Handles the two's complement representation by adding 256 to negative values.
+
+    Args:
+        x (jax.Array): Input array with int8 values (-128 to 127).
+
+    Returns:
+        jax.Array: Output array with equivalent uint8 values (0 to 255).
+
+    Example:
+        >>> i8tou8(jnp.array([-1, 0, 127], dtype=jnp.int8))
+        Array([255, 0, 127], dtype=int32)
+    """
     return jnp.where(x < 0, 256 + x, x)
 
 
 def u4toi4(x):
-    """Convert uint4 to int4 (signed)."""
+    """
+    Convert unsigned 4-bit integer to signed 4-bit integer.
+
+    Maps unsigned values 0-15 to signed range -8 to 7. Values 8-15 become
+    negative values -8 to -1.
+
+    Args:
+        x (jax.Array): Input array with uint4 values (0 to 15).
+
+    Returns:
+        jax.Array: Output array with signed int4 values (-8 to 7).
+
+    Example:
+        >>> u4toi4(jnp.array([0, 7, 8, 15]))
+        Array([0, 7, -8, -1], dtype=int32)
+    """
     return jnp.where(x >= 8, x - 16, x)
 
 
 def i4tou4(x):
-    """Convert int4 to uint4 (unsigned)."""
+    """
+    Convert signed 4-bit integer to unsigned 4-bit integer.
+
+    Maps signed values -8 to 7 to unsigned range 0-15. Negative values -8 to -1
+    become 8 to 15.
+
+    Args:
+        x (jax.Array): Input array with signed int4 values (-8 to 7).
+
+    Returns:
+        jax.Array: Output array with uint4 values (0 to 15).
+
+    Example:
+        >>> i4tou4(jnp.array([-8, -1, 0, 7]))
+        Array([8, 15, 0, 7], dtype=int32)
+    """
     return jnp.where(x < 0, 16 + x, x)
 
 
 def quantize_int8(x: jax.Array, axis: int | tuple = -1):
     """
-    Quantize values to 8-bit integers.
+    Quantize floating-point values to 8-bit integers with per-axis scaling.
+
+    Computes a scale factor based on the maximum absolute value along the
+    specified axis, then quantizes values to the int8 range [-127, 127].
 
     Args:
-        x (jax.Array): Input array.
+        x (jax.Array): Input array to quantize. Can be any floating-point dtype.
+        axis (int | tuple): Axis or axes along which to compute the scale factor.
+            Defaults to -1 (last axis). Can be a single int or tuple of ints.
 
     Returns:
-        tuple: A tuple containing:
-            - quantized_values (jax.Array): int8 array of shape (k,) containing quantized values.
-            - scales (jax.Array): Array of shape (nb,) containing scaling factors.
+        tuple[jax.Array, jax.Array]: A tuple containing:
+            - quant (jax.Array): int8 array with quantized values in range [-127, 127].
+            - scale (jax.Array): Float array of scale factors with shape broadcastable
+              to the input (dimensions along `axis` are kept as size 1).
+
+    Example:
+        >>> x = jnp.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        >>> quant, scale = quantize_int8(x, axis=-1)
+        >>> # quant is int8, scale has shape (2, 1)
+        >>> reconstructed = dequantize_int8(quant, scale)
+
+    Note:
+        A tiny epsilon is added to the scale to avoid division by zero for
+        arrays with all zeros. The scale preserves the original dtype of
+        the input array.
     """
     if not isinstance(axis, tuple):
         axis = (axis,)
@@ -181,14 +307,30 @@ def quantize_int8(x: jax.Array, axis: int | tuple = -1):
 
 def dequantize_int8(quants, scales):
     """
-    Dequantize 8-bit integers back to float32 values using blockwise scaling.
+    Dequantize 8-bit integers back to floating-point values.
+
+    Multiplies the quantized int8 values by their corresponding scale factors
+    to reconstruct approximate original values.
 
     Args:
-        quants (jax.Array): int8 array of shape (k,) containing quantized values.
-        scales (jax.Array): Array of shape (nb,) containing scaling factors.
+        quants (jax.Array): int8 array containing quantized values in range [-127, 127].
+        scales (jax.Array): Float array of scale factors, must be broadcastable
+            with quants. Typically has shape with size-1 dimensions where
+            quantization was performed.
 
     Returns:
-        jax.Array: Array of shape (k,) containing dequantized float32 values.
+        jax.Array: Dequantized array with the same shape as quants, dtype
+            determined by the scales array.
+
+    Example:
+        >>> quants = jnp.array([[42, 85, 127], [32, 64, 96]], dtype=jnp.int8)
+        >>> scales = jnp.array([[0.024], [0.047]])  # Shape (2, 1)
+        >>> result = dequantize_int8(quants, scales)
+        >>> # result has shape (2, 3) with float values
+
+    Note:
+        This is the inverse operation of quantize_int8. Due to rounding during
+        quantization, the reconstructed values are approximate.
     """
 
     return quants * scales
@@ -197,17 +339,37 @@ def dequantize_int8(quants, scales):
 @functools.partial(jax.jit, static_argnames=["block_size"])
 def single_quantize_and_pack_nf4(blocks, block_size=64):
     """
-    Combined quantization and packing for better performance.
-    Quantizes along the last dimension only, preserving structure.
+    Quantize and pack an array to NF4 format in a single pass.
+
+    This function performs block-wise NF4 quantization by:
+    1. Reshaping the input into blocks along the last dimension
+    2. Computing per-block absolute maximum values for scaling
+    3. Normalizing values by absmax
+    4. Finding nearest NF4 codebook values
+    5. Packing two 4-bit values into each uint8 byte
 
     Args:
-        blocks (jax.Array): Input array. Shape (..., features) where features % block_size == 0
-        block_size (int): Size of each quantization block. Defaults to 64.
+        blocks (jax.Array): Input array with shape (..., features) where
+            features must be divisible by block_size.
+        block_size (int): Number of elements per quantization block.
+            Defaults to 64. Must be even for packing.
 
     Returns:
-        tuple: A tuple containing:
-            - packed (jax.Array): uint8 packed values. Shape (..., num_blocks, block_size // 2)
-            - absmax (jax.Array): Absolute max per block. Shape (..., num_blocks)
+        tuple[jax.Array, jax.Array]: A tuple containing:
+            - packed (jax.Array): uint8 array with packed 4-bit values.
+              Shape (..., num_blocks, block_size // 2).
+            - absmax (jax.Array): Absolute maximum per block for dequantization.
+              Shape (..., num_blocks).
+
+    Example:
+        >>> x = jnp.ones((128, 256))  # 256 features, 4 blocks of 64
+        >>> packed, absmax = single_quantize_and_pack_nf4(x, block_size=64)
+        >>> packed.shape  # (128, 4, 32) - 4 blocks, 32 bytes each
+        >>> absmax.shape  # (128, 4) - one scale per block
+
+    Note:
+        This is optimized for JAX JIT compilation. For the high-level API,
+        use quantize_and_pack_nf4 instead.
     """
     orig_shape = blocks.shape
 
@@ -234,16 +396,34 @@ def single_quantize_and_pack_nf4(blocks, block_size=64):
 @functools.partial(jax.jit, static_argnames=["block_size"])
 def single_dequantize_nf4(packed_values, absmax, block_size):
     """
-    Optimized dequantization combining unpacking and scaling in fewer operations.
-    Preserves structure from quantization.
+    Dequantize packed NF4 values back to floating-point.
+
+    This function reverses the NF4 quantization by:
+    1. Unpacking two 4-bit values from each uint8 byte
+    2. Converting 4-bit indices to NF4 codebook values using polynomial approximation
+    3. Scaling by per-block absmax values
+    4. Flattening back to original feature dimension
 
     Args:
-        packed_values (jax.Array): uint8 packed values. Shape (..., num_blocks, block_size // 2)
-        absmax (jax.Array): Absolute max per block. Shape (..., num_blocks)
-        block_size (int): Size of each quantization block.
+        packed_values (jax.Array): uint8 array with packed 4-bit values.
+            Shape (..., num_blocks, block_size // 2).
+        absmax (jax.Array): Absolute maximum per block used during quantization.
+            Shape (..., num_blocks).
+        block_size (int): Number of elements per quantization block.
+            Must match the value used during quantization.
 
     Returns:
-        jax.Array: Dequantized array. Shape (..., num_blocks * block_size)
+        jax.Array: Dequantized float32 array with shape (..., num_blocks * block_size),
+            which equals the original feature dimension.
+
+    Example:
+        >>> # Given packed data from single_quantize_and_pack_nf4
+        >>> reconstructed = single_dequantize_nf4(packed, absmax, block_size=64)
+        >>> reconstructed.shape  # Original shape restored
+
+    Note:
+        Uses a polynomial approximation (nf4xf32_to_f32) instead of table lookup
+        for faster dequantization on accelerators.
     """
     # Unpack 4-bit values from 8-bit packed format
     high = (packed_values >> 4) & 0xF  # (..., num_blocks, block_size // 2)
@@ -267,16 +447,34 @@ def single_dequantize_nf4(packed_values, absmax, block_size):
 @functools.partial(jax.jit, static_argnames=["block_size"])
 def quantize_and_pack_nf4(blocks, block_size=64):
     """
-    Quantize and pack an array using NF4 quantization.
+    Quantize and pack an array using NF4 (4-bit NormalFloat) quantization.
+
+    High-level API for NF4 quantization. Quantizes the input array into 4-bit
+    NormalFloat format with block-wise scaling and packs two values per byte.
 
     Args:
-        blocks (jax.Array): Input array to be quantized and packed.
-        block_size (int): Size of each quantization block. Defaults to 64.
+        blocks (jax.Array): Input array to quantize. The last dimension must be
+            divisible by block_size. Shape: (..., features).
+        block_size (int): Number of elements per quantization block.
+            Defaults to 64. Larger blocks use less memory for scales but may
+            have higher quantization error.
 
     Returns:
-        tuple: A tuple containing:
-            - packed (jax.Array): uint8 array of packed quantized values.
-            - absmax (jax.Array): Array of absolute maximum values for each block.
+        tuple[jax.Array, jax.Array]: A tuple containing:
+            - packed (jax.Array): uint8 array with packed 4-bit values.
+              Shape: (..., num_blocks, block_size // 2).
+            - absmax (jax.Array): Per-block scale factors for dequantization.
+              Shape: (..., num_blocks).
+
+    Example:
+        >>> weights = jnp.ones((128, 256), dtype=jnp.float32)
+        >>> packed, absmax = quantize_and_pack_nf4(weights, block_size=64)
+        >>> # Reconstruct with dequantize_nf4
+        >>> reconstructed = dequantize_nf4(packed, absmax, block_size=64)
+
+    See Also:
+        - dequantize_nf4: Reverse operation to reconstruct values.
+        - single_quantize_and_pack_nf4: Internal implementation.
     """
     # Single function now handles all batch dimensions
     return single_quantize_and_pack_nf4(blocks, block_size)
@@ -285,15 +483,36 @@ def quantize_and_pack_nf4(blocks, block_size=64):
 @functools.partial(jax.jit, static_argnames=["block_size"])
 def dequantize_nf4(packed_values, absmax, block_size):
     """
-    Dequantize an array packed using NF4 quantization.
+    Dequantize an array from NF4 (4-bit NormalFloat) format.
+
+    High-level API for NF4 dequantization. Unpacks 4-bit values and scales
+    them by per-block absmax values to reconstruct approximate original values.
 
     Args:
-        packed_values (jax.Array): uint8 array of packed quantized values.
-        absmax (jax.Array): Array of absolute maximum values for each block.
-        block_size (int): Size of each quantization block.
+        packed_values (jax.Array): uint8 array with packed 4-bit values as
+            produced by quantize_and_pack_nf4. Shape: (..., num_blocks, block_size // 2).
+        absmax (jax.Array): Per-block scale factors from quantization.
+            Shape: (..., num_blocks).
+        block_size (int): Number of elements per quantization block.
+            Must match the value used during quantization.
 
     Returns:
-        jax.Array: Dequantized array of float32 values.
+        jax.Array: Dequantized float32 array with shape (..., features),
+            where features = num_blocks * block_size.
+
+    Example:
+        >>> # Given packed data from quantize_and_pack_nf4
+        >>> reconstructed = dequantize_nf4(packed, absmax, block_size=64)
+        >>> # reconstructed approximates original values
+
+    See Also:
+        - quantize_and_pack_nf4: Forward quantization operation.
+        - single_dequantize_nf4: Internal implementation.
+
+    Note:
+        Due to quantization, the reconstructed values are approximate.
+        NF4 provides better accuracy than uniform 4-bit quantization for
+        normally distributed data (typical of neural network weights).
     """
     # Single function now handles all batch dimensions
     return single_dequantize_nf4(packed_values, absmax, block_size)
@@ -358,6 +577,7 @@ def unpack_weights_1bit(packed: jnp.ndarray, dtype: jnp.dtype) -> jnp.ndarray:
 
 
 # TPU Pallas Kernels for optimized matmul
+# Set BLOCK_OVERRIDE to (block_x, block_y, block_k) to manually specify block sizes
 BLOCK_OVERRIDE = None
 
 

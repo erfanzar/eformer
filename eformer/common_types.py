@@ -26,7 +26,23 @@ from jax import numpy as jnp
 
 
 class _Empty:
-    """A sentinel class used to indicate a value that has not been explicitly provided."""
+    """Sentinel class indicating an unset or missing value.
+
+    This class serves as a sentinel type to distinguish between:
+    - A value that was explicitly set to None
+    - A value that was never provided
+
+    The singleton instance `NOT_GIVEN` should be used for comparisons.
+
+    Example:
+        >>> from eformer.common_types import NOT_GIVEN, EMPTY_VAL
+        >>>
+        >>> def func(value=NOT_GIVEN):
+        ...     if isinstance(value, EMPTY_VAL):
+        ...         print("Value was not provided")
+        ...     elif value is None:
+        ...         print("Value was explicitly set to None")
+    """
 
     pass
 

@@ -12,6 +12,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Sharding constraint utilities and mesh introspection functions.
+
+This module provides the core functionality for applying sharding constraints
+to JAX arrays with automatic correction based on mesh configuration and array
+shapes. It also includes utilities for introspecting mesh properties and
+extracting sharding information from arrays.
+
+Key Features:
+    - Automatic sharding constraint correction for compatibility
+    - Mesh introspection (axis names, sizes, device indices)
+    - Partition rule matching via regex patterns
+    - Sharding extraction from distributed arrays
+    - Pattern-based partition specification generation
+
+Environment Variables:
+    MIN_SHARDING_SIZE: Minimum array size to apply sharding (default: 16384).
+        Arrays smaller than this remain unsharded for efficiency.
+    LOG_SHARDING_MOVE: If "true", logs warnings about sharding corrections
+        and auto-adjustments.
+
+Example:
+    >>> from eformer.escale.partition.constraints import (
+    ...     with_sharding_constraint,
+    ...     get_incontext_mesh,
+    ...     match_partition_rules
+    ... )
+    >>> # Apply sharding with automatic correction
+    >>> with mesh:
+    ...     sharded = with_sharding_constraint(array, PartitionSpec('dp', 'tp'))
+    >>> # Match rules to parameters
+    >>> specs = match_partition_rules(rules, model_params)
+"""
 
 import os
 import re
@@ -533,13 +565,30 @@ def analyze_sharding_strategy(
     partition_specs: dict[str, PartitionSpec],
     mesh: Mesh | None = None,
 ) -> dict:
-    """
-    Analyzes the effectiveness of a sharding strategy.
+    """Analyze the effectiveness of a sharding strategy.
 
-    Returns metrics like:
-    - Memory usage per device
-    - Load balance
-    - Communication costs
+    Computes metrics to evaluate how well a sharding strategy distributes
+    computation and memory across devices. Useful for debugging and
+    optimizing distributed training configurations.
+
+    Args:
+        pytree: A PyTree of arrays to analyze.
+        partition_specs: Dictionary mapping paths to PartitionSpecs.
+        mesh: The JAX mesh to analyze against. If None, uses the
+            current context's mesh.
+
+    Returns:
+        A dictionary containing analysis metrics:
+            - "total_parameters": Total parameter count across all arrays
+            - "sharded_parameters": Count of parameters that are sharded
+            - "memory_per_device": Per-device memory breakdown (dict)
+            - "balance_score": Score indicating load balance (0.0-1.0)
+            - "partition_stats": Statistics about partition distribution
+
+    Example:
+        >>> analysis = analyze_sharding_strategy(params, specs, mesh)
+        >>> print(f"Sharded: {analysis['sharded_parameters']}/{analysis['total_parameters']}")
+        >>> print(f"Balance score: {analysis['balance_score']:.2f}")
     """
     if mesh is None:
         mesh = get_incontext_mesh()
@@ -607,9 +656,24 @@ def create_pattern_based_partition_spec(
 
 
 def extract_sharding_structure(pytree: tp.Any) -> tp.Any:
-    """
-    Extract a PyTree of NamedShardings matching the input structure.
-    Returns None for leaves without shardings.
+    """Extract NamedSharding objects from a PyTree of sharded arrays.
+
+    Creates a new PyTree with the same structure as the input, where each
+    leaf contains the NamedSharding of the corresponding array (or None
+    if the leaf has no sharding information).
+
+    Args:
+        pytree: A PyTree potentially containing sharded JAX arrays.
+
+    Returns:
+        A PyTree matching the input structure. Each leaf is either:
+            - A NamedSharding object if the original leaf was a sharded array
+            - None if the leaf had no sharding or wasn't a JAX array
+
+    Example:
+        >>> shardings = extract_sharding_structure(sharded_params)
+        >>> # shardings has same structure as sharded_params
+        >>> # but leaves are NamedSharding objects or None
     """
     leaves, treedef = jax.tree_util.tree_flatten(pytree)
 
@@ -624,26 +688,49 @@ def extract_sharding_structure(pytree: tp.Any) -> tp.Any:
 
 
 def get_shardings_with_structure(pytree: tp.Any) -> tp.Any:
-    """
-    Returns a PyTree matching the input structure containing either:
-    - NamedSharding objects where present
-    - None for leaves without NamedShardings
+    """Get shardings from a PyTree while preserving structure.
+
+    Alias for extract_sharding_structure. Returns a PyTree matching the
+    input structure where each leaf contains the NamedSharding of the
+    corresponding array (or None if unavailable).
+
+    Args:
+        pytree: A PyTree potentially containing sharded JAX arrays.
+
+    Returns:
+        A PyTree matching the input structure with NamedSharding objects
+        or None at each leaf position.
+
+    See Also:
+        extract_sharding_structure: The underlying implementation.
     """
     return extract_sharding_structure(pytree)
 
 
 def get_incontext_mesh(raise_error: bool = True) -> Mesh:
-    """Retrieves the mesh object active in the current execution context.
+    """Retrieve the mesh object active in the current execution context.
 
     This function accesses the physical mesh defined within the thread's
-    resource environment (pxla.thread_resources.env.physical_mesh).
+    resource environment (pxla.thread_resources.env.physical_mesh). It is
+    commonly used to get the mesh when inside a `with mesh:` context.
+
+    Args:
+        raise_error: If True (default), raises an AssertionError when no
+            mesh is active. If False, returns the empty mesh without error.
 
     Returns:
-        MeshType: The active mesh object for the current context.
+        The active Mesh object for the current context, or an empty mesh
+        if raise_error is False and no mesh is active.
 
     Raises:
-        AssertionError: If no mesh is found in the current context
-                        (i.e., mesh.empty is True).
+        AssertionError: If no mesh is found in the current context and
+            raise_error is True.
+
+    Example:
+        >>> with mesh:
+        ...     current_mesh = get_incontext_mesh()
+        ...     print(current_mesh.axis_names)
+        ('dp', 'tp')
     """
     mesh = pxla.thread_resources.env.physical_mesh
     if mesh.empty:

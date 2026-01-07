@@ -12,6 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+4-bit NormalFloat (NF4) Quantization Module.
+
+This module provides NF4 quantization for neural network weights, offering
+approximately 8x memory reduction compared to float32 while maintaining good
+accuracy for weights that follow Gaussian distributions.
+
+The NF4 format uses a 16-value codebook optimized for normally distributed
+data, making it particularly effective for transformer model weights. This
+module includes:
+
+- ArrayNF4: Implicit array class for NF4 quantized weights
+- TPU kernel support: Optimized Pallas kernels for direct matrix operations
+- Sharding support: Distributed computation with JAX sharding
+- JAX primitive handlers: Transparent integration with JAX operations
+
+Key Features:
+    - Block-wise quantization with configurable block sizes
+    - Automatic sharding preservation across operations
+    - TPU kernel dispatch for efficient matrix multiplication
+    - Fallback to materialization for unsupported operations
+
+Example:
+    >>> import jax.numpy as jnp
+    >>> from eformer.ops.quantization import ArrayNF4
+    >>>
+    >>> # Quantize weights
+    >>> weights = jnp.ones((128, 256), dtype=jnp.float32)
+    >>> quantized = ArrayNF4.quantize(weights, block_size=64)
+    >>>
+    >>> # Use transparently in matrix operations
+    >>> inputs = jnp.ones((32, 128))
+    >>> # On TPU: uses kernel, otherwise materializes
+    >>> output = inputs @ quantized  # Works via registered primitives
+"""
 
 from __future__ import annotations
 
@@ -24,7 +59,7 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from eformer.jaximus import ImplicitArray, aux_field, register, ste
 
@@ -145,6 +180,37 @@ class ArrayNF4(ImplicitArray):
             sharding=sharding,
         )
 
+    def with_mesh_and_axis(
+        self,
+        mesh_and_axis: tuple[Mesh, PartitionSpec | tuple[Any, ...] | None],
+    ) -> ArrayNF4:
+        """
+        Apply sharding using a mesh and axis specification tuple.
+
+        Convenience method that creates a NamedSharding from a mesh and axis
+        specification, commonly used with model parallelism utilities.
+
+        Args:
+            mesh_and_axis: A tuple of (Mesh, axis_spec) where axis_spec can be:
+                - None: Replicated across all devices
+                - PartitionSpec: Use directly
+                - tuple/list: Convert to PartitionSpec
+                - str: Single axis name
+
+        Returns:
+            ArrayNF4: New instance with the specified sharding applied.
+        """
+        mesh, axis = mesh_and_axis
+        if axis is None:
+            spec = PartitionSpec()
+        elif isinstance(axis, PartitionSpec):
+            spec = axis
+        elif isinstance(axis, (tuple, list)):
+            spec = PartitionSpec(*axis)
+        else:
+            spec = PartitionSpec(axis)
+        return self.with_sharding(NamedSharding(mesh, spec))
+
     def reshard(self, sharding: ShardingType) -> ArrayNF4:
         """Alias for with_sharding for API consistency."""
         return self.with_sharding(sharding)
@@ -155,12 +221,28 @@ class ArrayNF4(ImplicitArray):
         return self.sharding is not None
 
     def delete(self):
+        """
+        Delete the underlying packed and absmax arrays to free memory.
+
+        Explicitly releases the memory held by the quantized representation.
+        Useful for manual memory management in memory-constrained environments.
+        """
         self.packed.delete()
         self.absmax.delete()
 
 
 def _apply_sharding(array: Array, sharding: ShardingType) -> Array:
-    """Apply sharding constraint to an array if sharding is specified."""
+    """
+    Apply sharding constraint to an array if sharding is specified.
+
+    Args:
+        array (jax.Array): The array to apply sharding to.
+        sharding (ShardingType): NamedSharding, PartitionSpec, or None.
+
+    Returns:
+        jax.Array: The array with sharding constraint applied, or the
+            original array if sharding is None.
+    """
     if sharding is None:
         return array
 
@@ -293,7 +375,21 @@ def sqrt_nf4_x(primitive: Primitive, x: ArrayNF4) -> Any:
 
 
 def safe_materialize(arr: ArrayType) -> tuple[ArrayType, bool]:
-    """Safely materialize an array if it's ArrayNF4."""
+    """
+    Safely materialize an array if it's an ArrayNF4 quantized array.
+
+    This helper function handles the common pattern of conditionally
+    materializing quantized arrays for operations that don't support
+    implicit arrays.
+
+    Args:
+        arr (ArrayType): Input that may be ArrayNF4 or a regular array.
+
+    Returns:
+        tuple[ArrayType, bool]: A tuple containing:
+            - The materialized array (or original if not ArrayNF4)
+            - Boolean flag indicating if materialization occurred
+    """
     if isinstance(arr, ArrayNF4):
         materialized_arr = arr.materialize()
         return materialized_arr, True
@@ -301,14 +397,28 @@ def safe_materialize(arr: ArrayType) -> tuple[ArrayType, bool]:
 
 
 def safe_delete(arr: ArrayType, materialized: bool) -> None:
-    """Safely delete an array if it was materialized."""
+    """
+    Placeholder for safe array deletion after materialization.
+
+    This function is provided for API completeness but currently does
+    nothing. JAX arrays are garbage collected automatically.
+
+    Args:
+        arr (ArrayType): The array to potentially delete.
+        materialized (bool): Whether the array was materialized.
+    """
 
     if materialized:
         pass
 
 
 def _nf4_kernels_enabled() -> bool:
-    """Return True if NF4 kernels are enabled on the current device."""
+    """
+    Check if NF4 TPU kernels are enabled.
+
+    Returns:
+        bool: True if kernels are enabled and available (TPU device), False otherwise.
+    """
 
     try:
         return _quantization_impl._get_kernel_state()
@@ -317,7 +427,20 @@ def _nf4_kernels_enabled() -> bool:
 
 
 def _unpack_nf4_codes(packed: jax.Array, block_size: int) -> jax.Array | None:
-    """Unpack packed NF4 values (two nibbles per byte) into individual codes."""
+    """
+    Unpack packed NF4 values (two nibbles per byte) into individual codes.
+
+    Extracts the high and low 4-bit nibbles from each packed byte and
+    interleaves them to reconstruct the original code sequence.
+
+    Args:
+        packed (jax.Array): Packed uint8 array with shape (..., num_blocks, block_size // 2).
+        block_size (int): Original block size (must match quantization).
+
+    Returns:
+        jax.Array | None: Unpacked codes with shape (..., num_blocks * block_size),
+            or None if the input shape is invalid.
+    """
 
     if packed.ndim < 2:
         return None
@@ -334,7 +457,20 @@ def _unpack_nf4_codes(packed: jax.Array, block_size: int) -> jax.Array | None:
 
 
 def _expand_nf4_absmax(absmax: jax.Array, block_size: int) -> jax.Array | None:
-    """Broadcast absmax values so every NF4 element has a matching scale."""
+    """
+    Broadcast absmax values so every NF4 element has a matching scale.
+
+    Expands per-block absmax values to match the element count for
+    element-wise scaling during dequantization.
+
+    Args:
+        absmax (jax.Array): Per-block scale values with shape (..., num_blocks).
+        block_size (int): Number of elements per block.
+
+    Returns:
+        jax.Array | None: Expanded scales with shape (..., num_blocks * block_size),
+            or None if input is a scalar.
+    """
 
     if absmax.ndim < 1:
         return None
@@ -343,7 +479,22 @@ def _expand_nf4_absmax(absmax: jax.Array, block_size: int) -> jax.Array | None:
 
 
 def _prepare_nf4_kernel_tensors(weight: ArrayNF4, *, transpose: bool = False) -> tuple[jax.Array, jax.Array] | None:
-    """Convert packed NF4 weights into the tensors expected by the TPU kernels."""
+    """
+    Convert packed NF4 weights into tensors for TPU kernel consumption.
+
+    Unpacks the NF4 codes and expands absmax values into the format
+    expected by the Pallas TPU kernels (bmm_nf4, bmm_nf4_transpose).
+
+    Args:
+        weight (ArrayNF4): The quantized NF4 weight array.
+        transpose (bool): If True, transpose the weight for backward pass.
+
+    Returns:
+        tuple[jax.Array, jax.Array] | None: A tuple of (quants, scales) tensors
+            ready for kernel input, or None if the weight format is incompatible.
+            - quants: uint8 array of shape (dim0, 1, dim1) with NF4 codes
+            - scales: float32 array of shape (dim0, 1, dim1) with per-element scales
+    """
 
     packed = weight.packed
     absmax = weight.absmax
@@ -377,7 +528,23 @@ def _prepare_nf4_kernel_tensors(weight: ArrayNF4, *, transpose: bool = False) ->
 
 
 def _flatten_inputs_for_kernel(lhs: jax.Array) -> tuple[jax.Array, tuple[int, ...]]:
-    """Reshape lhs to (batch, k) for kernel consumption."""
+    """
+    Reshape input tensor to 2D for kernel consumption.
+
+    Flattens all batch dimensions into a single dimension while keeping
+    the contracting dimension (k) separate.
+
+    Args:
+        lhs (jax.Array): Input tensor with shape (..., k).
+
+    Returns:
+        tuple[jax.Array, tuple[int, ...]]: A tuple containing:
+            - inputs: 2D array with shape (batch_size, k)
+            - batch_shape: Original batch dimensions for reshaping output
+
+    Raises:
+        ValueError: If input is a scalar (0-dimensional).
+    """
 
     if lhs.ndim == 0:
         raise ValueError("lhs must have at least 1 dimension for matmul")
@@ -389,7 +556,16 @@ def _flatten_inputs_for_kernel(lhs: jax.Array) -> tuple[jax.Array, tuple[int, ..
 
 
 def _move_axis_to_last(arr: jax.Array, axis: int) -> jax.Array:
-    """Move the specified axis to the last dimension."""
+    """
+    Move the specified axis to the last position.
+
+    Args:
+        arr (jax.Array): Input array.
+        axis (int): Axis to move (supports negative indexing).
+
+    Returns:
+        jax.Array: Array with the specified axis moved to the last position.
+    """
 
     axis = axis % arr.ndim
     if axis == arr.ndim - 1:
@@ -402,7 +578,21 @@ def _kernel_rhs_matmul(
     rhs: ArrayNF4,
     dimension_numbers: tuple[Any, Any],
 ) -> jax.Array | None:
-    """Attempt to run the TPU kernel when rhs is quantized."""
+    """
+    Execute TPU kernel matmul when right operand is NF4 quantized.
+
+    Attempts to use optimized TPU kernels for lhs @ rhs where rhs is
+    an ArrayNF4. Falls back to None (triggering materialization) if
+    the operation is unsupported.
+
+    Args:
+        lhs (jax.Array): Left operand (regular array).
+        rhs (ArrayNF4): Right operand (NF4 quantized).
+        dimension_numbers: JAX dot_general dimension specification.
+
+    Returns:
+        jax.Array | None: Result of kernel matmul, or None if unsupported.
+    """
 
     if not _nf4_kernels_enabled():
         return None
@@ -444,7 +634,21 @@ def _kernel_lhs_matmul(
     rhs: jax.Array,
     dimension_numbers: tuple[Any, Any],
 ) -> jax.Array | None:
-    """Attempt to run the TPU kernel when lhs is quantized."""
+    """
+    Execute TPU kernel matmul when left operand is NF4 quantized.
+
+    Attempts to use optimized TPU kernels (transposed variant) for
+    lhs @ rhs where lhs is an ArrayNF4. Used primarily for backward
+    passes in training.
+
+    Args:
+        lhs (ArrayNF4): Left operand (NF4 quantized).
+        rhs (jax.Array): Right operand (regular array).
+        dimension_numbers: JAX dot_general dimension specification.
+
+    Returns:
+        jax.Array | None: Result of kernel matmul, or None if unsupported.
+    """
 
     if not _nf4_kernels_enabled():
         return None
@@ -502,7 +706,22 @@ def _maybe_kernel_dot_general(
     dimension_numbers: tuple[Any, Any] | None,
     preferred_element_type: Any,
 ) -> jax.Array | None:
-    """Dispatch to TPU kernels when applicable."""
+    """
+    Dispatch dot_general to TPU kernels when applicable.
+
+    Checks if the operation can be handled by TPU kernels based on operand
+    types and settings. Returns None to trigger fallback materialization
+    if kernels cannot be used.
+
+    Args:
+        lhs (ArrayType): Left operand (may be ArrayNF4 or regular array).
+        rhs (ArrayType): Right operand (may be ArrayNF4 or regular array).
+        dimension_numbers: JAX dot_general dimension specification.
+        preferred_element_type: Requested output dtype (kernels require None).
+
+    Returns:
+        jax.Array | None: Kernel result if applicable, None otherwise.
+    """
 
     if preferred_element_type is not None or dimension_numbers is None:
         return None
@@ -828,7 +1047,21 @@ def concatenate_nf4_operands(
 
 @register("broadcast_in_dim")
 def broadcast_in_dim_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args, **params) -> ArrayType:
-    """Handle broadcast_in_dim for ArrayNF4. Preserves sharding from the original array."""
+    """
+    Custom handler for JAX's broadcast_in_dim operation.
+
+    Materializes ArrayNF4 input, performs broadcasting, and re-quantizes the result.
+    Preserves sharding from the original array.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (ArrayNF4): The array to broadcast.
+        *args: Positional arguments for the broadcast operation.
+        **params: Keyword parameters including shape and broadcast_dimensions.
+
+    Returns:
+        ArrayType: The broadcasted array, re-quantized as ArrayNF4 with sharding preserved.
+    """
     array = operand.materialize()
     subfuns, bind_params = primitive.get_bind_params(params)
 
@@ -844,7 +1077,22 @@ def broadcast_in_dim_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args,
 
 @register("gather")
 def gather_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args: Any, **kwargs: Any) -> ArrayType:
-    """Handle gather for ArrayNF4."""
+    """
+    Custom handler for JAX's gather operation.
+
+    Materializes ArrayNF4 input before performing index-based gathering.
+    Returns a regular array (not re-quantized) since gather typically selects
+    arbitrary elements.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (ArrayNF4): The source array to gather from.
+        *args: Positional arguments including start_indices.
+        **kwargs: Keyword arguments for the gather operation.
+
+    Returns:
+        ArrayType: The gathered values as a regular JAX array.
+    """
     operand_mat, _operand_materialized = safe_materialize(operand)
     result = jax.lax.gather(operand_mat, *args, **kwargs)
     return result
@@ -853,7 +1101,42 @@ def gather_nf4_operand(primitive: Primitive, operand: ArrayNF4, *args: Any, **kw
 @ste
 def straight_through_nf4(weights: jax.Array, block_size: int = 64):
     """
-    Straight-through NF4 emulator.
+    Straight-through estimator for NF4 quantization.
+
+    Quantizes weights to NF4 format in the forward pass, but passes gradients
+    straight through (unchanged) in the backward pass. This enables
+    quantization-aware training where the model learns to compensate for
+    quantization effects.
+
+    Args:
+        weights (jax.Array): Input weights to quantize. Typically float32 or
+            bfloat16 neural network parameters.
+        block_size (int): Number of elements per quantization block.
+            Defaults to 64. Larger blocks use less memory for scales.
+
+    Returns:
+        jax.Array: Materialized quantized weights with the same shape as input.
+            Forward pass returns quantized values, backward pass passes
+            gradients through unchanged to enable training.
+
+    Example:
+        >>> import jax
+        >>> import jax.numpy as jnp
+        >>> from eformer.ops.quantization import straight_through_nf4
+        >>>
+        >>> # Use in a training step for QAT
+        >>> @jax.jit
+        ... def forward(params, x):
+        ...     # Apply NF4 quantization with STE
+        ...     w = straight_through_nf4(params['weight'], block_size=64)
+        ...     return x @ w
+        >>>
+        >>> # Gradients flow to original float32 params
+        >>> grad_fn = jax.grad(lambda p, x: forward(p, x).sum())
+
+    Note:
+        The @ste decorator makes this function differentiable by implementing
+        the identity gradient (grad_input = grad_output) in the backward pass.
     """
 
     return ArrayNF4.quantize(weights, block_size=block_size).materialize()

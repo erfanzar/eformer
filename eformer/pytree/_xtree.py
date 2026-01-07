@@ -36,12 +36,24 @@ _PRIMITIVE_TYPES = (
     type,
     tp.Callable,
 )
+"""Tuple of types considered as primitive (non-PyTree node) types.
+
+These types are treated as leaves in PyTree operations and are not
+recursively traversed. They are typically non-array data that should
+be preserved as-is during tree operations.
+"""
 
 _STATE_DICT_REGISTRY: dict[tp.Any, tp.Any] = {}
 
 
 class _NamedTuple:
-    """Fake type marker for namedtuple for registry."""
+    """Sentinel type marker for namedtuple serialization registration.
+
+    This class serves as a key in the state dict registry to handle
+    namedtuple types uniformly. Since namedtuples are dynamically created
+    and don't share a common base class, this marker allows registering
+    a single pair of serialization functions for all namedtuple types.
+    """
 
 
 def _is_namedtuple(x: tp.Any) -> bool:
@@ -58,12 +70,27 @@ def _is_namedtuple(x: tp.Any) -> bool:
 
 
 class _ErrorContext(threading.local):
-    """
-    Thread-local context for tracking the path during deserialization for error messages.
+    """Thread-local context for tracking the path during deserialization.
+
+    This class maintains a thread-safe stack of path components that tracks
+    the current location within a nested data structure during deserialization.
+    This enables meaningful error messages that indicate exactly where in the
+    structure a problem occurred.
+
+    Attributes:
+        path: List of string path components representing the current location
+            in the nested structure being processed.
+
+    Examples:
+        >>> ctx = _ErrorContext()
+        >>> ctx.path.append("layer1")
+        >>> ctx.path.append("weights")
+        >>> "/".join(ctx.path)
+        'layer1/weights'
     """
 
     def __init__(self):
-        """Initializes the error context with an empty path."""
+        """Initialize the error context with an empty path stack."""
         self.path = []
 
 
@@ -338,18 +365,52 @@ def dataclass(clz: _T | None = None, **kwargs) -> _T | Callable[[_T], _T]:
 
 
 def _list_to_state_dict(target: list) -> list:
+    """Convert a list to its state dictionary representation.
+
+    Args:
+        target: The list to serialize.
+
+    Returns:
+        list: List of serialized elements.
+    """
     return [xto_state_dict(item) for item in target]
 
 
 def _list_from_state_dict(target: list | None, state: list) -> list:
+    """Restore a list from its state dictionary representation.
+
+    Args:
+        target: Optional target list (unused, included for API consistency).
+        state: List of serialized element states.
+
+    Returns:
+        list: Deserialized list.
+    """
     return [xfrom_state_dict(None, item_state, name=f"[{i}]") for i, item_state in enumerate(state)]
 
 
 def _tuple_to_state_dict(target: tuple) -> list:
+    """Convert a tuple to its state dictionary representation.
+
+    Args:
+        target: The tuple to serialize.
+
+    Returns:
+        list: List of serialized elements (tuples are stored as lists in JSON).
+    """
     return [xto_state_dict(item) for item in target]
 
 
 def _tuple_from_state_dict(target: tuple | None, state: list) -> tuple:
+    """Restore a tuple from its state dictionary representation.
+
+    Args:
+        target: Optional target tuple for type information.
+        state: List of serialized element states.
+
+    Returns:
+        tuple: Deserialized tuple.
+    """
     elems = []
     target_elems = target if target and len(target) == len(state) else [None] * len(state)
     for i, item_state in enumerate(state):
@@ -358,6 +419,17 @@ def _tuple_from_state_dict(target: tuple | None, state: list) -> tuple:
 
 
 def _set_to_state_dict(target: set) -> list:
+    """Convert a set to its state dictionary representation.
+
+    Attempts to sort elements for deterministic serialization; falls back
+    to arbitrary order if elements are not comparable.
+
+    Args:
+        target: The set to serialize.
+
+    Returns:
+        list: List of serialized elements.
+    """
     try:
         sorted_items = sorted(list(target))
         return [xto_state_dict(item) for item in sorted_items]
@@ -366,10 +438,30 @@ def _set_to_state_dict(target: set) -> list:
 
 
 def _set_from_state_dict(target: set | None, state: list) -> set:
+    """Restore a set from its state dictionary representation.
+
+    Args:
+        target: Optional target set (unused, included for API consistency).
+        state: List of serialized element states.
+
+    Returns:
+        set: Deserialized set.
+    """
     return {xfrom_state_dict(None, item_state, name=f"{{{i}}}") for i, item_state in enumerate(state)}
 
 
 def _frozenset_to_state_dict(target: frozenset) -> list:
+    """Convert a frozenset to its state dictionary representation.
+
+    Attempts to sort elements for deterministic serialization; falls back
+    to arbitrary order if elements are not comparable.
+
+    Args:
+        target: The frozenset to serialize.
+
+    Returns:
+        list: List of serialized elements.
+    """
     try:
         sorted_items = sorted(list(target))
         return [xto_state_dict(item) for item in sorted_items]
@@ -378,10 +470,33 @@ def _frozenset_to_state_dict(target: frozenset) -> list:
 
 
 def _frozenset_from_state_dict(target: frozenset | None, state: list) -> frozenset:
+    """Restore a frozenset from its state dictionary representation.
+
+    Args:
+        target: Optional target frozenset (unused, included for API consistency).
+        state: List of serialized element states.
+
+    Returns:
+        frozenset: Deserialized frozenset.
+    """
     return frozenset(xfrom_state_dict(None, item_state, name=f"f{{{i}}}") for i, item_state in enumerate(state))
 
 
 def _dict_to_state_dict(target: dict) -> dict[str, tp.Any]:
+    """Convert a dictionary to its state dictionary representation.
+
+    Converts all keys to strings for JSON compatibility. Supports int, float,
+    bool, None, and string keys.
+
+    Args:
+        target: The dictionary to serialize.
+
+    Returns:
+        dict[str, Any]: Dictionary with string keys and serialized values.
+
+    Raises:
+        TypeError: If a key cannot be converted to a JSON-compatible string.
+    """
     new_dict = {}
     for k, v in target.items():
         if not isinstance(k, str):
@@ -398,6 +513,15 @@ def _dict_to_state_dict(target: dict) -> dict[str, tp.Any]:
 
 
 def _dict_from_state_dict(target: dict | None, state: dict[str, tp.Any]) -> dict:
+    """Restore a dictionary from its state dictionary representation.
+
+    Args:
+        target: Optional target dictionary for type hints on values.
+        state: Dictionary with string keys and serialized values.
+
+    Returns:
+        dict: Deserialized dictionary.
+    """
     new_dict = {}
     target_dict = target if target else {}
     for k, v_state in state.items():
@@ -407,6 +531,16 @@ def _dict_from_state_dict(target: dict | None, state: dict[str, tp.Any]) -> dict
 
 
 def _namedtuple_to_state_dict(target: tuple) -> dict[str, tp.Any]:
+    """Convert a namedtuple to its state dictionary representation.
+
+    Uses _asdict() if available, otherwise manually extracts field values.
+
+    Args:
+        target: The namedtuple instance to serialize.
+
+    Returns:
+        dict[str, Any]: Dictionary mapping field names to serialized values.
+    """
     if hasattr(target, "_asdict"):
         data = target._asdict()
     else:
@@ -415,6 +549,20 @@ def _namedtuple_to_state_dict(target: tuple) -> dict[str, tp.Any]:
 
 
 def _namedtuple_from_state_dict(target: tuple | None, state: dict[str, tp.Any]) -> tuple:
+    """Restore a namedtuple from its state dictionary representation.
+
+    Args:
+        target: A prototype namedtuple instance providing type information.
+        state: Dictionary mapping field names to serialized values.
+
+    Returns:
+        tuple: A new namedtuple instance of the same type as target.
+
+    Raises:
+        TypeError: If target is None (namedtuples require a prototype).
+        ValueError: If required fields are missing from the state dict.
+        TypeError: If namedtuple reconstruction fails.
+    """
     if target is None:
         raise TypeError("Cannot deserialize a namedtuple without a target prototype instance.")
     target_type = type(target)
@@ -444,10 +592,32 @@ def _namedtuple_from_state_dict(target: tuple | None, state: dict[str, tp.Any]) 
 
 
 def _jax_array_to_state_dict(target: jax.Array) -> list:
+    """Convert a JAX array to its state dictionary representation.
+
+    Converts the array to a nested Python list for JSON serialization.
+
+    Args:
+        target: The JAX array to serialize.
+
+    Returns:
+        list: Nested list representation of the array.
+    """
     return target.tolist()
 
 
 def _jax_array_from_state_dict(target: jax.Array | None, state: list) -> jax.Array:
+    """Restore a JAX array from its state dictionary representation.
+
+    Args:
+        target: Optional target array providing dtype information.
+        state: Nested list representation of the array.
+
+    Returns:
+        jax.Array: Reconstructed JAX array.
+
+    Raises:
+        TypeError: If array reconstruction fails.
+    """
     dtype = target.dtype if target is not None else None
     try:
         arr = jax.numpy.array(state, dtype=dtype)

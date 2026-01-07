@@ -33,6 +33,24 @@ logger = get_logger(__name__)
 
 
 def reshard(x, target_sharding):
+    """Reshard an array to a new sharding specification.
+
+    Uses JIT compilation with sharding constraints to efficiently move an array
+    to a new sharding layout across devices.
+
+    Args:
+        x: Input JAX array to reshard.
+        target_sharding: Target sharding specification (e.g., NamedSharding).
+
+    Returns:
+        The input array resharded according to target_sharding.
+
+    Example:
+        >>> from jax.sharding import NamedSharding, PartitionSpec
+        >>> new_sharding = NamedSharding(mesh, PartitionSpec("data"))
+        >>> resharded = reshard(my_array, new_sharding)
+    """
+
     @jax.jit
     def _move(y):
         return with_sharding_constraint(y, target_sharding)
@@ -41,7 +59,27 @@ def reshard(x, target_sharding):
 
 
 def to_host(x: jax.Array, float_dtype: jnp.floating | None, mesh: Mesh, cpu_offload: bool):
-    """Move array to host with optional dtype conversion."""
+    """Move array to host with optional dtype conversion and CPU offloading.
+
+    Reshards the array to a fully replicated sharding on the provided mesh,
+    optionally offloads to CPU, and converts floating point arrays to the
+    specified dtype.
+
+    Args:
+        x: JAX array to move to host.
+        float_dtype: Target dtype for floating point arrays. Can be a string
+            (e.g., "float32") or jnp dtype. If None, dtype is unchanged.
+        mesh: JAX mesh to use for resharding to replicated layout.
+        cpu_offload: If True, additionally reshard to CPU mesh to free
+            accelerator memory.
+
+    Returns:
+        Array moved to host, potentially with converted dtype.
+
+    Note:
+        CPU offloading is useful for preventing OOM during checkpointing by
+        moving data off accelerators before serialization.
+    """
     if isinstance(x, jax.Array):
         x = reshard(x, NamedSharding(mesh, PartitionSpec()))
         if cpu_offload:
@@ -126,17 +164,62 @@ def derive_base_prefix_from_path(path_str: str) -> str:
 
 
 def shard_filename(base_prefix: str, idx: int, total: int) -> str:
-    """Generate shard filename."""
+    """Generate a standardized shard filename for sharded checkpoints.
+
+    Creates filenames following the pattern: <prefix>-XXXXX-of-YYYYY.safetensors
+
+    Args:
+        base_prefix: Base path/prefix for the shard files.
+        idx: Shard index (1-indexed).
+        total: Total number of shards.
+
+    Returns:
+        Full shard filename with zero-padded indices.
+
+    Example:
+        >>> shard_filename("/checkpoints/model", 1, 4)
+        '/checkpoints/model-00001-of-00004.safetensors'
+    """
     return f"{base_prefix}-{idx:05d}-of-{total:05d}.safetensors"
 
 
 def index_filename(base_prefix: str) -> str:
-    """Generate index filename."""
+    """Generate the index filename for a sharded checkpoint.
+
+    Creates the filename for the JSON index file that maps tensor names
+    to their shard files.
+
+    Args:
+        base_prefix: Base path/prefix for the checkpoint.
+
+    Returns:
+        Full path to the index JSON file.
+
+    Example:
+        >>> index_filename("/checkpoints/model")
+        '/checkpoints/model.safetensors.index.json'
+    """
     return f"{base_prefix}.safetensors.index.json"
 
 
 def is_gcs_path(path: str) -> bool:
-    """Check if path is a GCS path (starts with gs://)."""
+    """Check if a path points to Google Cloud Storage.
+
+    Determines whether a path is a GCS path by checking for the gs:// prefix
+    or by checking if it's a GCSPath instance.
+
+    Args:
+        path: Path string or path object to check.
+
+    Returns:
+        True if the path is a GCS path, False otherwise.
+
+    Example:
+        >>> is_gcs_path("gs://my-bucket/checkpoint")
+        True
+        >>> is_gcs_path("/local/path/checkpoint")
+        False
+    """
     from ..paths import GCSPath, LocalPath
 
     if isinstance(path, GCSPath):

@@ -139,13 +139,34 @@ def apply_sharding_tree(
 ) -> dict:
     """Apply sharding specifications from a sharding tree to arrays.
 
+    Takes a dictionary of arrays and applies corresponding sharding specifications
+    from a matching sharding tree structure. Handles callable shardings, direct
+    Sharding objects, and falls back to default sharding when needed.
+
     Args:
-        arrays: Dictionary of arrays (flattened or nested).
-        sharding_tree: PyTree of sharding specifications matching arrays structure.
-        mesh: JAX mesh for creating shardings.
+        arrays: Dictionary of arrays (flattened or nested). Can contain JAX arrays
+            or numpy arrays.
+        sharding_tree: PyTree of sharding specifications matching the structure of
+            arrays. Each leaf can be a Sharding object, a callable that returns
+            a Sharding, or None for default sharding.
+        mesh: JAX mesh for creating default shardings when sharding_tree leaf is None.
+            If mesh is None, uses SingleDeviceSharding.
 
     Returns:
-        Dictionary of arrays with sharding applied.
+        Dictionary of arrays with sharding applied via jax.device_put.
+
+    Note:
+        - If sharding_tree is None, returns arrays unchanged.
+        - Structure mismatches are logged as warnings and original arrays returned.
+        - Non-array leaves (scalars, etc.) are returned unchanged.
+
+    Example:
+        >>> arrays = {"layer1.weight": weight_arr, "layer1.bias": bias_arr}
+        >>> shard_tree = {
+        ...     "layer1.weight": NamedSharding(mesh, PartitionSpec("data")),
+        ...     "layer1.bias": NamedSharding(mesh, PartitionSpec()),
+        ... }
+        >>> sharded = apply_sharding_tree(arrays, shard_tree, mesh)
     """
     if sharding_tree is None:
         return arrays
@@ -184,14 +205,30 @@ def apply_sharding_tree(
 
 
 def validate_sharding_tree(sharding_tree: dict, expected_structure: dict) -> bool:
-    """Validate that a sharding tree matches expected structure.
+    """Validate that a sharding tree structure matches an expected structure.
+
+    Compares the tree definitions of two PyTrees to ensure they have compatible
+    structures before applying shardings during checkpoint loading.
 
     Args:
-        sharding_tree: PyTree of sharding specifications.
-        expected_structure: Expected PyTree structure (e.g., from checkpoint index).
+        sharding_tree: PyTree of sharding specifications to validate.
+        expected_structure: Expected PyTree structure (e.g., from checkpoint index
+            or a template model state).
 
     Returns:
-        True if structures match, False otherwise.
+        True if the tree structures match (same number of leaves in same positions),
+        False otherwise.
+
+    Note:
+        - Uses JAX tree_util for structure comparison.
+        - Logs a warning if validation encounters an error.
+        - Only compares structure (treedef), not the actual values.
+
+    Example:
+        >>> shard_tree = create_sharding_tree_from_index("checkpoint/")
+        >>> model_structure = jax.tree_util.tree_map(lambda x: None, model_state)
+        >>> if validate_sharding_tree(shard_tree, model_structure):
+        ...     print("Sharding tree is compatible")
     """
     import jax.tree_util as jtu
 
@@ -206,6 +243,31 @@ def validate_sharding_tree(sharding_tree: dict, expected_structure: dict) -> boo
 
 
 def make_itsharded(xs, mesh):
+    """Convert a PyTree of arrays to fully replicated shardings on a mesh.
+
+    Takes a PyTree and reshards all fully addressable JAX arrays to use
+    a replicated sharding (PartitionSpec()) on the provided mesh. Non-array
+    leaves and arrays that are not fully addressable are left unchanged.
+
+    Args:
+        xs: PyTree containing JAX arrays and potentially other values.
+        mesh: JAX Mesh to use for the replicated sharding.
+
+    Returns:
+        PyTree with same structure where fully addressable arrays have been
+        resharded to replicated layout across all devices in the mesh.
+
+    Note:
+        - Uses JIT compilation for efficient device placement.
+        - Only processes arrays where is_fully_addressable is True.
+        - Useful for preparing data for collective operations or checkpointing.
+
+    Example:
+        >>> from jax.sharding import Mesh
+        >>> mesh = Mesh(jax.devices(), ("data",))
+        >>> sharded_state = make_itsharded(model_state, mesh)
+    """
+
     def _procss(x):
         if isinstance(x, jax.Array) and x.is_fully_addressable:
 

@@ -75,6 +75,7 @@ class QuantizationConfig:
     use_kernel: bool = True
 
     def __post_init__(self):
+        """Post-initialization to convert string dtype to QuantizationType enum."""
         if isinstance(self.dtype, str):
             self.dtype = QuantizationType(self.dtype)
 

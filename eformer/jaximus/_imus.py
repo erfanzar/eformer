@@ -66,10 +66,9 @@ from typing import TypeGuard
 import chex
 import jax
 import jax._src
+import jax._src.core as core
 import jax._src.lax
 import jax._src.pjit
-import jax.core
-import jax.core as core
 import jax.extend
 import jax.extend.linear_util as lu
 import jax.numpy as jnp
@@ -85,7 +84,18 @@ StaticScalar = np.bool_ | np.number | bool | int | float | complex
 ArrayLike = jax.Array | np.ndarray | StaticScalar
 
 
-class OrginArray(ABC): ...  # noqa
+class OrginArray(ABC):
+    """Abstract base class for array-like types in the implicit array system.
+
+    This class serves as a registry for types that should be treated as
+    "original" array types. jax.Array is automatically registered.
+
+    The class is used in type checking and dispatch logic to determine
+    whether a value is an array-like type that can participate in
+    implicit array operations.
+    """
+
+    ...
 
 
 OrginArray.register(jax.Array)
@@ -166,11 +176,29 @@ def ste(func):
 
 
 def default_handler(primitive, *args, **params):
+    """Default handler that executes a JAX primitive normally.
+
+    Args:
+        primitive: JAX primitive to execute.
+        *args: Arguments to the primitive.
+        **params: Parameters for the primitive.
+
+    Returns:
+        Result of executing the primitive with the given arguments.
+    """
     subfuns, bind_params = primitive.get_bind_params(params)
     return primitive.bind(*subfuns, *args, **bind_params)
 
 
 def _materialize_all(vals):
+    """Materialize all ImplicitArray instances in a sequence.
+
+    Args:
+        vals: Sequence of values, some of which may be ImplicitArrays.
+
+    Returns:
+        List with all ImplicitArrays replaced by their materialized form.
+    """
     outs = []
     for val in vals:
         if hasattr(val, "materialize"):
@@ -180,13 +208,33 @@ def _materialize_all(vals):
 
 
 def materialize_handler(primitive, *vals, params):
+    """Handler that materializes all ImplicitArrays before executing primitive.
+
+    This is the fallback handler used when no custom handler is registered
+    for a primitive operation involving ImplicitArrays.
+
+    Args:
+        primitive: JAX primitive to execute.
+        *vals: Values that may include ImplicitArrays.
+        params: Parameters for the primitive.
+
+    Returns:
+        Result of executing the primitive after materializing all values.
+    """
     vals = _materialize_all(vals)
     subfuns, bind_params = primitive.get_bind_params(params)
     result = primitive.bind(*subfuns, *vals, **bind_params)
     return result
 
 
-class UninitializedAval(Exception): ...
+class UninitializedAval(Exception):
+    """Exception raised when accessing uninitialized abstract value attributes.
+
+    This is raised when trying to access shape or dtype on an ImplicitArray
+    before these values have been computed or set.
+    """
+
+    ...
 
 
 def aux_field(metadata=None, **kwargs):
@@ -241,10 +289,23 @@ def aux_field(metadata=None, **kwargs):
 
 
 class _AvalDescriptor:
+    """Descriptor for lazy abstract value (aval) attributes.
+
+    This descriptor provides lazy initialization for shape and dtype attributes
+    on ImplicitArray subclasses. It stores values in a private attribute and
+    raises UninitializedAval if accessed before being set.
+
+    The descriptor enables ImplicitArray to defer shape/dtype computation
+    until actually needed, supporting cases where these values are derived
+    from materialization.
+    """
+
     def __set_name__(self, owner, name):
+        """Store the private attribute name when the descriptor is assigned."""
         self._name = f"_{name}"
 
     def __get__(self, obj, owner=None):
+        """Get the attribute value, raising UninitializedAval if not set."""
         if obj is None:
             return None
         result = getattr(obj, self._name, None)
@@ -253,13 +314,23 @@ class _AvalDescriptor:
         return result
 
     def __set__(self, obj, value):
+        """Set the attribute value."""
         setattr(obj, self._name, value)
 
 
 _aval_discovery = ContextVar("aval_discovery", default=False)
+"""Context variable tracking whether we're in aval discovery mode."""
 
 
 def _def_leaf(x):
+    """Check if a value is an ImplicitArray leaf node for tree operations.
+
+    Args:
+        x: Value to check.
+
+    Returns:
+        True if x is an ImplicitArray instance.
+    """
     return isinstance(x, ImplicitArray)
 
 
@@ -326,6 +397,17 @@ implicit = use_implicit  # Alias for convenience
 
 
 def materialize_nested(implicit_arr, full=False):
+    """Recursively materialize nested ImplicitArray structures.
+
+    Args:
+        implicit_arr: ImplicitArray or nested ImplicitArray to materialize.
+        full: If True, recursively materialize until reaching a regular array.
+              If False, only materialize one level.
+
+    Returns:
+        Materialized array. If materialization fails, returns an array of ones
+        with the expected shape and dtype.
+    """
     while isinstance(implicit_arr, ImplicitArray):
         try:
             implicit_arr = implicit_arr.materialize()
@@ -339,6 +421,17 @@ def materialize_nested(implicit_arr, full=False):
 
 
 def _get_materialization_aval(imp_arr):
+    """Get the abstract value (shape/dtype) of a materialized ImplicitArray.
+
+    Uses jax.eval_shape to determine the output shape without actually
+    performing materialization.
+
+    Args:
+        imp_arr: ImplicitArray to get aval for.
+
+    Returns:
+        ShapedArray representing the materialized array's shape and dtype.
+    """
     with _aval_discovery_context():
         result = jax.eval_shape(ft.partial(materialize_nested, full=True), imp_arr)
     return result
@@ -346,6 +439,12 @@ def _get_materialization_aval(imp_arr):
 
 @contextmanager
 def _aval_discovery_context():
+    """Context manager for abstract value discovery mode.
+
+    Sets the _aval_discovery context variable to True, which signals to
+    tree operations that we're discovering avals and should handle
+    uninitialized values gracefully.
+    """
     token = _aval_discovery.set(True)
     try:
         yield
@@ -354,11 +453,35 @@ def _aval_discovery_context():
 
 
 def is_array(element: tp.Any) -> bool:
+    """Check if an element is an array type (NumPy or JAX).
+
+    Args:
+        element: Value to check.
+
+    Returns:
+        True if element is a NumPy array, NumPy scalar, or JAX array.
+    """
     return isinstance(element, np.ndarray | np.generic | jax.Array)
 
 
 @dataclass
 class _ArrayBase(OrginArray, abc.ABC):
+    """Base class providing common array attributes for ImplicitArray.
+
+    This abstract base class defines the core attributes and class-level
+    configuration that all ImplicitArray subclasses share.
+
+    Class Attributes:
+        commute_ops: If True, operations may be reordered for optimization.
+        warn_on_materialize: If True, warn when falling back to materialization.
+        default_shape: Default shape for the array type, if known statically.
+        default_dtype: Default dtype for the array type, if known statically.
+
+    Instance Attributes:
+        shape: The logical shape of the array.
+        dtype: The data type of the materialized array.
+    """
+
     commute_ops: tp.ClassVar[bool] = True
     warn_on_materialize: tp.ClassVar[bool] = True
 
@@ -550,11 +673,34 @@ class ImplicitArray(_ArrayBase):
 
 
 def _get_names_and_aux(obj):
+    """Get field names and auxiliary flags for a dataclass.
+
+    Yields tuples of (field_name, is_auxiliary) for each field in the dataclass.
+
+    Args:
+        obj: Dataclass instance or type.
+
+    Yields:
+        Tuples of (str, bool) where the bool indicates if the field is auxiliary.
+    """
     for val in dataclasses.fields(obj):
         yield val.name, bool(val.metadata.get("implicit_array_aux"))
 
 
 def combine_leaf_predicate(base_fn, is_leaf):
+    """Wrap a tree function to include ImplicitArray as a leaf type.
+
+    Creates a new function that combines the given is_leaf predicate with
+    an additional predicate, allowing custom leaf detection.
+
+    Args:
+        base_fn: Original tree function (e.g., tu.tree_map).
+        is_leaf: Predicate function to treat values as leaves.
+
+    Returns:
+        Wrapped function that uses the combined leaf predicate.
+    """
+
     @ft.wraps(base_fn)
     def new_fn(*args, new_is_leaf=None):
         if new_is_leaf is None:
@@ -570,36 +716,72 @@ def combine_leaf_predicate(base_fn, is_leaf):
 
 
 def leaf_predicate(x):
+    """Predicate for identifying ImplicitArray leaves in tree operations.
+
+    Args:
+        x: Value to check.
+
+    Returns:
+        True if x is an ImplicitArray instance.
+    """
     return isinstance(x, ImplicitArray)
 
+
+# Tree utilities that treat ImplicitArray as leaves
+# These functions are versions of jax.tree_util functions that recognize
+# ImplicitArray instances as leaf nodes rather than traversing into them.
 
 tree_map_with_implicit = combine_leaf_predicate(
     tu.tree_map,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_map but treats ImplicitArray as leaves."""
+
 tree_map_with_path_with_implicit = combine_leaf_predicate(
     tu.tree_map_with_path,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_map_with_path but treats ImplicitArray as leaves."""
+
 tree_flatten_with_implicit = combine_leaf_predicate(
     tu.tree_flatten,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_flatten but treats ImplicitArray as leaves."""
+
 tree_flatten_with_path_with_implicit = combine_leaf_predicate(
     tu.tree_flatten_with_path,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_flatten_with_path but treats ImplicitArray as leaves."""
+
 tree_leaves_with_implicit = combine_leaf_predicate(
     tu.tree_leaves,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_leaves but treats ImplicitArray as leaves."""
+
 tree_structure_with_implicit = combine_leaf_predicate(
     tu.tree_structure,
     leaf_predicate,
 )
+"""Like jax.tree_util.tree_structure but treats ImplicitArray as leaves."""
 
 
 def flatten_one_implicit_layer(tree):
+    """Flatten one layer of nested ImplicitArrays in a tree.
+
+    For nested ImplicitArray structures, this function flattens just one level,
+    treating nested ImplicitArrays as leaves.
+
+    Args:
+        tree: Pytree potentially containing nested ImplicitArrays.
+
+    Returns:
+        Tuple of (leaves, structure) where leaves are flattened one level
+        and structure is the pytree structure.
+    """
+
     def is_leaf_below_node(node, x):
         return isinstance(x, ImplicitArray) and x is not node
 
@@ -628,6 +810,15 @@ def flatten_one_implicit_layer(tree):
 
 
 def implicit_depth(tree):
+    """Calculate the maximum nesting depth of ImplicitArrays in a tree.
+
+    Args:
+        tree: Pytree potentially containing nested ImplicitArrays.
+
+    Returns:
+        Integer depth of nesting. 0 means no ImplicitArrays, 1 means
+        ImplicitArrays with no nesting, etc.
+    """
     leaves = tree_leaves_with_implicit(tree)
     depth = 0
     while True:
@@ -647,6 +838,20 @@ def implicit_depth(tree):
 
 
 def _map_leaves_with_implicit_path(f, leaves, is_leaf, path_prefix=()):
+    """Map a function over leaves with path tracking for nested ImplicitArrays.
+
+    Recursively maps a function over leaves in a tree structure, keeping track
+    of the path to each leaf for nested ImplicitArray structures.
+
+    Args:
+        f: Function to apply to each leaf.
+        leaves: List of leaf values.
+        is_leaf: Predicate function (path, leaf) -> bool to stop recursion.
+        path_prefix: Tuple prefix for the current path in the tree.
+
+    Returns:
+        List of mapped leaf values with nested structures preserved.
+    """
     mapped_leaves = []
     for idx, leaf in enumerate(leaves):
         path = (*path_prefix, idx)
@@ -788,6 +993,15 @@ def _default_process(
 
 
 def _wrap_tracer(x, trace: _CustomTrace):
+    """Wrap an ImplicitArray value in a CustomTracer for dispatch.
+
+    Args:
+        x: Value to potentially wrap.
+        trace: CustomTrace instance to associate with the tracer.
+
+    Returns:
+        _CustomTracer if x is an ImplicitArray, otherwise x unchanged.
+    """
     if _is_value(x):
         return _CustomTracer(trace, x)
     else:
@@ -795,6 +1009,15 @@ def _wrap_tracer(x, trace: _CustomTrace):
 
 
 def _unwrap_tracer(x, trace):
+    """Unwrap a CustomTracer to get the underlying value.
+
+    Args:
+        x: Value to potentially unwrap.
+        trace: CustomTrace instance for raising arrays.
+
+    Returns:
+        The underlying value if x is a CustomTracer, otherwise x unchanged.
+    """
     if is_array(x):
         x = trace.full_raise(x)
     if isinstance(x, _CustomTracer):
@@ -804,17 +1027,36 @@ def _unwrap_tracer(x, trace):
 
 
 class _CustomTracer(core.Tracer):
+    """JAX tracer that wraps ImplicitArray values for operation interception.
+
+    This tracer is used within the implicit array dispatch system to wrap
+    ImplicitArray instances. When operations are performed on traced values,
+    they are intercepted by the associated _CustomTrace and routed to
+    registered handlers.
+
+    Attributes:
+        value: The wrapped ImplicitArray instance.
+    """
+
     __slots__ = ("value",)
 
     def __init__(self, trace: _CustomTrace, value: ImplicitArray) -> None:
+        """Initialize the tracer with a trace and value.
+
+        Args:
+            trace: The CustomTrace this tracer belongs to.
+            value: The ImplicitArray to wrap.
+        """
         self._trace = trace
         self.value = value
 
     @property
     def aval(self):
+        """Get the abstract value (shape/dtype) of the wrapped array."""
         return self.value.aval
 
     def full_lower(self):
+        """Lower the tracer to a concrete value if possible."""
         if isinstance(self.value, ImplicitArray):
             return self
         else:
@@ -822,17 +1064,57 @@ class _CustomTracer(core.Tracer):
 
 
 class _CustomTrace(core.Trace[_CustomTracer]):
+    """JAX trace implementation for implicit array dispatch.
+
+    This trace intercepts primitive operations and routes them to registered
+    handlers when ImplicitArray instances are involved. It integrates with
+    JAX's tracing infrastructure to provide transparent operation dispatch.
+
+    Attributes:
+        tag: Unique identifier for this trace instance.
+        parent_trace: The enclosing trace to delegate to when needed.
+    """
+
     def __init__(self, parent_trace, tag):
+        """Initialize the trace with a parent and unique tag.
+
+        Args:
+            parent_trace: Enclosing JAX trace.
+            tag: Unique TraceTag for this trace instance.
+        """
         super().__init__()
         self.tag = tag
         self.parent_trace = parent_trace
 
     def to_value(self, val):
+        """Extract the value from a tracer if it belongs to this trace.
+
+        Args:
+            val: Tracer or value to extract.
+
+        Returns:
+            The underlying value if val is a matching tracer, otherwise val.
+        """
         if isinstance(val, _CustomTracer) and val._trace.tag is self.tag:
             return val.value
         return val
 
     def process_primitive(self, primitive, tracers, params):
+        """Process a JAX primitive operation, dispatching to custom handlers.
+
+        This is the core dispatch method. It extracts values from tracers,
+        looks up registered handlers for the primitive, and either:
+        1. Calls a matching handler if registered
+        2. Falls back to materializing ImplicitArrays and calling the primitive
+
+        Args:
+            primitive: JAX primitive being executed.
+            tracers: List of traced values (operands).
+            params: Parameters for the primitive.
+
+        Returns:
+            _CustomTracer wrapping the result (or list of tracers for multi-output).
+        """
         values = [self.to_value(t) for t in tracers]
         values = tuple(values)
         implicit_idx = next(
@@ -884,6 +1166,11 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         return out
 
     def process_shard_map(self: _CustomTrace, primitive, fun, tracers, **params):
+        """Process shard_map primitives by materializing and delegating.
+
+        Shard maps require concrete arrays, so ImplicitArrays are materialized
+        before execution.
+        """
         tracers = [(arr.materialize() if _is_value(arr) else arr) for arr in [self.to_value(t) for t in tracers]]
         out = primitive.bind_with_trace(self.parent_trace, (fun, *tracers), params)
         if primitive.multiple_results:
@@ -892,6 +1179,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
             return _CustomTracer(self, out)
 
     def process_map(self, map_primitive, f, tracers, **params):
+        """Process map primitives (pmap, etc.) by materializing inputs."""
         in_values = [self.to_value(t) for t in tracers]
         with core.set_current_trace(self.parent_trace):
             out = _default_process(map_primitive, in_values, params)
@@ -901,6 +1189,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
             return _CustomTracer(self, out)
 
     def process_custom_transpose(self, prim, call, tracers, **params):
+        """Process custom transpose primitives by materializing inputs."""
         in_values = [self.to_value(t) for t in tracers]
         with core.set_current_trace(self.parent_trace):
             out = _default_process(prim, in_values, params)
@@ -910,6 +1199,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
             return _CustomTracer(self, out)
 
     def process_call(self, call_primitive, f, tracers, params):
+        """Process call primitives by materializing inputs."""
         in_values = [self.to_value(t) for t in tracers]
         with core.set_current_trace(self.parent_trace):
             out = _default_process(call_primitive, in_values, params)
@@ -928,6 +1218,11 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         out_trees,
         symbolic_zeros,
     ):
+        """Process custom JVP calls by materializing inputs.
+
+        Custom JVP requires concrete arrays, so all ImplicitArrays are
+        materialized before the forward pass is executed.
+        """
         del fwd, bwd, out_trees, symbolic_zeros
         in_values = [self.to_value(t) for t in tracers]
         arrays: list[chex.Array] = []
@@ -938,7 +1233,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
                 arrays.append(tp.cast(chex.Array, x))
             else:
                 arrays.append(x)
-        with jax.core.set_current_trace(self.parent_trace):
+        with core.set_current_trace(self.parent_trace):
             out_leaves = fun.call_wrapped(*arrays)
         if primitive.multiple_results:
             return [_CustomTracer(self, x) for x in out_leaves]
@@ -955,6 +1250,11 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         out_trees,
         symbolic_zeros,
     ):
+        """Process custom VJP calls by materializing inputs.
+
+        Custom VJP requires concrete arrays for the forward pass,
+        so all ImplicitArrays are materialized before execution.
+        """
         del fwd, bwd, out_trees, symbolic_zeros
         in_values = [self.to_value(t) for t in tracers]
         arrays: list[chex.Array] = []
@@ -965,7 +1265,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
                 arrays.append(tp.cast(chex.Array, x))
             else:
                 arrays.append(x)
-        with jax.core.set_current_trace(self.parent_trace):
+        with core.set_current_trace(self.parent_trace):
             out_leaves = fun.call_wrapped(*arrays)
         if primitive.multiple_results:
             return [_CustomTracer(self, x) for x in out_leaves]
@@ -974,30 +1274,15 @@ class _CustomTrace(core.Trace[_CustomTracer]):
 
 
 def _custom_vjp_fwd_wrap(fwd, tag, in_treedef):
-    def wrapped(*args):
-        inputs = args[-len(in_treedef.children()) :]
-        inputs = tu.tree_unflatten(in_treedef, inputs)
-        out = fwd(*inputs)
-        if not isinstance(out, tuple):
-            out = (out,)
-        out_flat, _ = tu.tree_flatten(out)
-        return out_flat
+    """Wrap a custom VJP forward function for use with ImplicitArrays.
 
-    return wrapped
+    This wrapper handles the flattening/unflattening of pytrees to work
+    with JAX's custom VJP infrastructure.
 
+    Note: This function is defined twice; the second definition is the
+    active one that returns the output tree structure.
+    """
 
-def _custom_vjp_bwd_wrap(bwd, tag, in_treedef):
-    def wrapped(*args):
-        out = bwd(*args)
-        if not isinstance(out, tuple):
-            out = (out,)
-        out_flat, _ = tu.tree_flatten(out)
-        return out_flat
-
-    return wrapped
-
-
-def _custom_vjp_fwd_wrap(fwd, tag, in_treedef):
     def wrapped(*args):
         inputs = tu.tree_unflatten(in_treedef, args)
         out = fwd(*inputs)
@@ -1010,6 +1295,12 @@ def _custom_vjp_fwd_wrap(fwd, tag, in_treedef):
 
 
 def _custom_vjp_bwd_wrap(bwd, tag, in_treedef):
+    """Wrap a custom VJP backward function for use with ImplicitArrays.
+
+    This wrapper handles the flattening/unflattening of pytrees to work
+    with JAX's custom VJP infrastructure for backward passes.
+    """
+
     def wrapped(*args):
         res_and_cts = tu.tree_unflatten(in_treedef, args)
         out = bwd(*res_and_cts)
@@ -1072,6 +1363,14 @@ def _custom_jvp_jvp_wrap(tag, in_treedef, *in_primals_and_tangents):
 
 
 def _is_value(x) -> TypeGuard[ImplicitArray]:
+    """Type guard to check if a value is an ImplicitArray.
+
+    Args:
+        x: Value to check.
+
+    Returns:
+        True if x is an ImplicitArray, with type narrowing for static analysis.
+    """
     return isinstance(x, ImplicitArray)
 
 

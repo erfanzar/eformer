@@ -218,6 +218,38 @@ class AsyncCheckpointManager:
         enable_compression: bool = False,
         use_tensorstore: bool = True,
     ):
+        """Initialize the AsyncCheckpointManager.
+
+        Args:
+            enable: Whether checkpointing is enabled. If None, auto-detection is used
+                based on process index during save operations.
+            float_dtype: Default data type for floating point arrays when saving.
+                Defaults to jnp.bfloat16 for memory efficiency.
+            verbose: Enable verbose logging output. Defaults to False.
+            gcs_bucket: Optional Google Cloud Storage bucket name for cloud storage.
+                If provided, enables GCS integration.
+            gcs_credentials_path: Optional path to GCS service account credentials JSON.
+                If None and gcs_bucket is set, uses default credentials.
+            enable_validation: Enable checksum validation for data integrity.
+                Computes SHA256 checksums during save and verifies during load.
+                Defaults to False for performance.
+            enable_compression: Enable compression for TensorStore backend.
+                Can reduce checkpoint size at the cost of CPU time. Defaults to False.
+            use_tensorstore: Use TensorStore backend when available. TensorStore
+                provides better performance for large distributed checkpoints.
+                Defaults to True.
+
+        Raises:
+            RuntimeError: If running with multiple processes and JAX distributed
+                is not initialized.
+
+        Example:
+            >>> manager = AsyncCheckpointManager(
+            ...     float_dtype=jnp.float32,
+            ...     use_tensorstore=True,
+            ...     enable_validation=True
+            ... )
+        """
         if jax.process_count() > 1:
             if not is_initialized():
                 raise RuntimeError("you should call jax distribution init before running process.")
@@ -499,12 +531,24 @@ class AsyncCheckpointManager:
         return results
 
     def _save_single(self, tree: dict, path: str, metadata: dict):
-        """Save single checkpoint file.
+        """Save a single checkpoint file using SafeTensors format.
+
+        Saves the flattened tree dictionary to a single SafeTensors file with
+        optional metadata. Non-string metadata values are JSON-serialized.
 
         Args:
-            tree: Dictionary to save.
-            path: Path where the checkpoint will be saved.
-            metadata: Metadata to save with the checkpoint.
+            tree: Flattened dictionary of arrays to save. Keys should be
+                dot-separated strings representing the tree path.
+            path: Path where the checkpoint file will be saved.
+            metadata: Dictionary of metadata to store with the checkpoint.
+                Non-string values will be JSON-serialized.
+
+        Returns:
+            The path where the checkpoint was saved.
+
+        Note:
+            SafeTensors format requires all metadata values to be strings,
+            so non-string values are automatically JSON-encoded.
         """
         if metadata:
             metadata = {k: json.dumps(v) if not isinstance(v, str) else v for k, v in metadata.items()}

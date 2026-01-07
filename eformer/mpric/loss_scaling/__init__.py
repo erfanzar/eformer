@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Loss scaling submodule for mixed precision training stability.
+
+This submodule provides loss scaling utilities that help maintain numerical
+stability during mixed precision training. Loss scaling is essential when
+using low-precision dtypes (float16) to prevent gradient underflow.
+
+Classes:
+    DynamicLossScale: Automatically adjusts scale based on gradient health.
+    NoOpLossScale: No-op scaler for when loss scaling is not needed.
+    LossScaleConfig: Configuration for loss scaling hyperparameters.
+"""
 
 from .loss_scaler import DynamicLossScale, LossScaleConfig, NoOpLossScale
 

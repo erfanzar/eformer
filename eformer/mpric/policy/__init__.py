@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Precision policy submodule for defining mixed precision behavior.
+
+This submodule provides the Policy dataclass that defines the dtypes used for
+different aspects of mixed precision computation: parameters, compute operations,
+and outputs.
+
+Policies can be created from simple or detailed string specifications, making
+it easy to configure precision settings for different hardware and use cases.
+"""
 
 from .policy import Policy
 

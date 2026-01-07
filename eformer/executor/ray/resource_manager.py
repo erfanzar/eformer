@@ -457,7 +457,16 @@ def available_cpu_cores() -> int:
 
 
 def _safe_tpu_chips_per_host() -> int:
-    """Best-effort TPU chip count lookup with a safe fallback for non-TPU nodes."""
+    """Best-effort TPU chip count lookup with a safe fallback for non-TPU nodes.
+
+    Queries the TPUAcceleratorManager to determine the number of TPU chips
+    available on the current node. Designed to work safely in mixed environments
+    where some nodes may not have TPUs.
+
+    Returns:
+        int: Number of TPU chips on the current host, or 0 if detection fails
+            or the node does not have TPUs.
+    """
     try:
         count = TPUAcceleratorManager.get_current_node_num_accelerators()
     except Exception:
@@ -466,7 +475,15 @@ def _safe_tpu_chips_per_host() -> int:
 
 
 def _safe_tpu_worker_count() -> int:
-    """Best-effort TPU worker count with a safe fallback for non-TPU drivers."""
+    """Best-effort TPU worker count with a safe fallback for non-TPU drivers.
+
+    Queries the Ray TPU utilities to determine the number of workers in
+    the current TPU pod. Returns a safe default for non-TPU environments.
+
+    Returns:
+        int: Number of TPU workers in the current pod, or 1 if detection fails
+            or the node is not part of a TPU pod.
+    """
     try:
         count = ray.util.accelerators.tpu.get_current_pod_worker_count()
     except Exception:
@@ -475,7 +492,15 @@ def _safe_tpu_worker_count() -> int:
 
 
 def _safe_tpu_runtime_name() -> str:
-    """Best-effort TPU pod name with a stable fallback."""
+    """Best-effort TPU pod name with a stable fallback.
+
+    Queries the Ray TPU utilities to get the current TPU pod name. If the
+    name cannot be determined (e.g., not running on a TPU pod), generates
+    a unique UUID as a fallback.
+
+    Returns:
+        str: The TPU pod name if available, otherwise a randomly generated UUID.
+    """
     try:
         name = ray.util.accelerators.tpu.get_current_pod_name()
     except Exception:
@@ -729,7 +754,21 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
         remote_fn: RemoteFunction | tp.Callable,
         **extra_envs,
     ):
-        """Prepare a remote function for CPU execution with merged runtime env."""
+        """Prepare a remote function for CPU execution with merged runtime environment.
+
+        Wraps a remote function with CPU-specific resource requirements and
+        runtime environment configuration. The function is forkified to run
+        in a separate process for isolation.
+
+        Args:
+            remote_fn: The remote function or callable to configure.
+            **extra_envs: Additional environment variables to merge into
+                the runtime environment.
+
+        Returns:
+            RemoteFunction: Configured remote function with CPU resources and
+                merged runtime environment.
+        """
         remote_fn = RayResources.forkify_remote_fn(remote_fn)
         if not isinstance(remote_fn, RemoteFunction):
             remote_fn = ray.remote(remote_fn)
@@ -866,7 +905,21 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
         remote_fn: RemoteFunction | tp.Callable,
         **extra_envs,
     ):
-        """Prepare a remote function for GPU execution with merged runtime env."""
+        """Prepare a remote function for GPU execution with merged runtime environment.
+
+        Wraps a remote function with GPU-specific resource requirements and
+        runtime environment configuration. The function is forkified to run
+        in a separate process for isolation.
+
+        Args:
+            remote_fn: The remote function or callable to configure.
+            **extra_envs: Additional environment variables to merge into
+                the runtime environment.
+
+        Returns:
+            RemoteFunction: Configured remote function with GPU resources,
+                optional accelerator type, and merged runtime environment.
+        """
         remote_fn = RayResources.forkify_remote_fn(remote_fn)
         if not isinstance(remote_fn, RemoteFunction):
             remote_fn = ray.remote(remote_fn)

@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Precision handler submodule for mixed precision operations.
+
+This submodule provides the PrecisionHandler class, which serves as the main
+interface for managing mixed precision training and inference in JAX.
+
+The PrecisionHandler integrates precision policies with loss scaling to enable
+efficient low-precision training while maintaining numerical stability.
+"""
 
 from .precision_handler import PrecisionHandler
 

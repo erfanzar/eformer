@@ -24,12 +24,21 @@ from fsspec.asyn import AsyncFileSystem
 def exists(url, **kwargs) -> bool:
     """Check if a file or directory exists at the given URL.
 
+    Uses fsspec to support multiple storage backends including local filesystem,
+    Google Cloud Storage (gs://), Amazon S3 (s3://), and more.
+
     Args:
         url: URL or path to check. Supports various protocols (file://, gs://, s3://, etc.).
-        **kwargs: Additional arguments passed to fsspec.core.url_to_fs.
+        **kwargs: Additional arguments passed to fsspec.core.url_to_fs (e.g., credentials).
 
     Returns:
         True if the path exists, False otherwise.
+
+    Example:
+        >>> exists("/local/path/file.txt")
+        True
+        >>> exists("gs://my-bucket/checkpoint/model.safetensors")
+        False
     """
     fs, path = fsspec.core.url_to_fs(url, **kwargs)
     return fs.exists(path)
@@ -38,11 +47,20 @@ def exists(url, **kwargs) -> bool:
 def mkdirs(path):
     """Create a directory and all necessary parent directories.
 
+    Uses fsspec to support multiple storage backends. Creates the directory
+    and any missing parent directories recursively.
+
     Args:
-        path: Path or URL of the directory to create.
+        path: Path or URL of the directory to create. Supports local paths and
+            cloud storage URLs (gs://, s3://, etc.).
 
     Note:
         Uses exist_ok=True, so no error is raised if the directory already exists.
+        This makes it safe to call multiple times on the same path.
+
+    Example:
+        >>> mkdirs("/local/path/to/checkpoint/dir")
+        >>> mkdirs("gs://my-bucket/checkpoints/run-1000")
     """
     fs, path = fsspec.core.url_to_fs(path)
     fs.makedirs(path, exist_ok=True)
@@ -80,10 +98,23 @@ def expand_glob(url):
 def remove(url, *, recursive=False, **kwargs):
     """Remove a file or directory.
 
+    Uses fsspec for cross-platform and cloud-compatible file removal.
+
     Args:
-        url: URL or path of the file/directory to remove.
+        url: URL or path of the file/directory to remove. Supports local paths
+            and cloud storage URLs (gs://, s3://, etc.).
         recursive: If True, remove directories and their contents recursively.
-        **kwargs: Additional arguments passed to fsspec.core.url_to_fs.
+            Required for non-empty directories. Defaults to False.
+        **kwargs: Additional arguments passed to fsspec.core.url_to_fs
+            (e.g., credentials for cloud storage).
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        OSError: If trying to remove a non-empty directory without recursive=True.
+
+    Example:
+        >>> remove("/local/path/file.txt")
+        >>> remove("gs://my-bucket/old-checkpoint", recursive=True)
     """
     fs, path = fsspec.core.url_to_fs(url, **kwargs)
 
@@ -93,16 +124,29 @@ def remove(url, *, recursive=False, **kwargs):
 async def async_remove(url, *, recursive=False, **kwargs):
     """Asynchronously remove a file or directory.
 
-    Uses async operations when the filesystem supports it, otherwise falls back
-    to synchronous removal.
+    Uses async operations when the filesystem supports it (e.g., gcsfs, s3fs),
+    otherwise falls back to synchronous removal. Useful for non-blocking I/O
+    in async contexts.
 
     Args:
-        url: URL or path of the file/directory to remove.
+        url: URL or path of the file/directory to remove. Supports local paths
+            and cloud storage URLs (gs://, s3://, etc.).
         recursive: If True, remove directories and their contents recursively.
-        **kwargs: Additional arguments passed to fsspec.core.url_to_fs.
+            Required for non-empty directories. Defaults to False.
+        **kwargs: Additional arguments passed to fsspec.core.url_to_fs
+            (e.g., credentials for cloud storage).
 
     Returns:
-        None if successful, or result from async filesystem operation.
+        None. The async filesystem operation result is awaited internally.
+
+    Note:
+        - For AsyncFileSystem backends (GCS, S3), uses native async _rm method.
+        - For synchronous backends (local filesystem), blocks during removal.
+        - Prefer this over remove() when running in async contexts for better
+          performance with cloud storage.
+
+    Example:
+        >>> await async_remove("gs://my-bucket/old-checkpoint", recursive=True)
     """
     fs, path = fsspec.core.url_to_fs(url, **kwargs)
 

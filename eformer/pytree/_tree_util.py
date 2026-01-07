@@ -38,6 +38,14 @@ from ._pytree import PyTree, auto_pytree
 
 
 class NonePolicy(str, Enum):
+    """Policy for handling None values in tree operations.
+
+    Attributes:
+        PRESERVE: Keep None values as-is in the tree.
+        REPLACE: Replace None values with a specified replacement.
+        ERROR: Raise an error when None values are encountered.
+    """
+
     PRESERVE = "preserve"
     REPLACE = "replace"
     ERROR = "error"
@@ -60,10 +68,18 @@ IsLeafFn: tp.TypeAlias = tp.Callable[[tp.Any], bool]
 
 @auto_pytree
 class _EmptyNode:
+    """Sentinel class representing an empty node in flattened trees.
+
+    This is used as a placeholder in flattened dictionaries to preserve
+    the structure of empty nested dictionaries, which would otherwise be
+    lost during the flattening process.
+    """
+
     pass
 
 
 empty_node = _EmptyNode()
+"""Singleton instance of _EmptyNode used as the empty node marker."""
 M = tp.TypeVar("M")
 IsLeafCallable = Callable[[tuple[Any, ...], Mapping[Any, Any]], bool]
 
@@ -139,7 +155,14 @@ def is_array_like(element: tp.Any) -> bool:
 
 
 class TreeFilter(tp.Protocol):
-    """tp.Protocol for tree filter functions."""
+    """Protocol defining the interface for tree filter functions.
+
+    Tree filters are callable objects that take a mask (boolean or callable)
+    and an argument (the tree to filter), returning a filtered tree dictionary.
+
+    This protocol enables type checking for functions that implement tree
+    filtering logic.
+    """
 
     def __call__(self, mask: tp.Any, arg: tp.Any) -> TreeDict: ...  # type:ignore
 
@@ -755,24 +778,65 @@ def unflatten_mapping(xs: Any, /, *, sep: str | None = None) -> dict[Any, Any]:
 
 
 class MetaValueRecreator:
-    """Helper class for recreating meta values with state tracking"""
+    """Helper class for generating unique meta values with state tracking.
+
+    Provides methods to generate incrementing counts and random keys in a
+    reproducible manner. Useful for reinitializing model metadata that
+    requires unique values.
+
+    Attributes:
+        _count: Internal counter for generating unique count values.
+        _rng: JAX random key state for generating random values.
+
+    Examples:
+        >>> recreator = MetaValueRecreator(seed=42)
+        >>> count1 = recreator.get_count()  # Returns 0
+        >>> count2 = recreator.get_count()  # Returns 1
+        >>> key = recreator.get_rng()  # Returns a unique random key
+    """
 
     def __init__(self, seed: int = 42):
+        """Initialize the recreator with a random seed.
+
+        Args:
+            seed: Random seed for reproducible key generation.
+        """
         self._count = 0
         self._rng = jax.random.PRNGKey(seed)
 
     def get_count(self) -> jnp.ndarray:
+        """Get the next count value and increment the counter.
+
+        Returns:
+            jnp.ndarray: Current count as a uint32 array.
+        """
         count = self._count
         self._count += 1
         return jnp.array(count, dtype=jnp.uint32)
 
     def get_rng(self) -> jax.random.PRNGKey:
+        """Get a new random key and update internal state.
+
+        Returns:
+            jax.random.PRNGKey: A new random key split from the internal state.
+        """
         key, self._rng = jax.random.split(self._rng)
         return key
 
 
 @auto_pytree
 class StateValidationResult:
+    """Result of validating a state dictionary against a target structure.
+
+    This class stores the outcome of state validation, including whether
+    the validation passed and details about any issues found.
+
+    Attributes:
+        is_valid: True if validation passed, False otherwise.
+        missing_keys: Set of keys present in target but missing from state.
+        invalid_types: Dictionary mapping key paths to their incorrect types.
+    """
+
     is_valid: bool
     missing_keys: set
     invalid_types: dict[str, type]
@@ -1953,7 +2017,26 @@ def tree_flatten_one_level_with_keys(pytree: PyTree) -> tuple[list[tuple[KeyEntr
 
 
 def key_path_to_str(path: Sequence) -> str:
-    """Helper method to format optimizer state keys."""
+    """Convert a JAX key path element to a string representation.
+
+    Handles various JAX key types (SequenceKey, DictKey, GetAttrKey,
+    FlattenedIndexKey) and converts them to readable string format.
+
+    Args:
+        path: A sequence containing JAX key path elements. Only the
+            last element is processed.
+
+    Returns:
+        str: String representation of the last path element, or empty
+            string if path is empty.
+
+    Examples:
+        >>> from jax._src.tree_util import DictKey, SequenceKey
+        >>> key_path_to_str([DictKey("weights")])
+        'weights'
+        >>> key_path_to_str([SequenceKey(0)])
+        '0'
+    """
     if not path:
         return ""
     path_elem = path[-1]
@@ -1979,23 +2062,44 @@ def key_path_to_str(path: Sequence) -> str:
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass
 class PackedLeaf:
-    """Metadata describing the location and shape of a packed leaf."""
+    """Metadata describing the location and shape of a leaf in a packed array.
+
+    Used by pack_pytree and unpack_pytree to track where each leaf's data
+    is stored within the flattened 1-D array representation.
+
+    Attributes:
+        offset: Starting index of this leaf's data in the packed array.
+        shape: Original shape of this leaf array before packing.
+    """
 
     offset: int = dataclasses.field(metadata={"static": True})
     shape: tuple[int, ...] = dataclasses.field(metadata={"static": True})
 
 
 def pack_pytree(tree: PyTree, dtype=jnp.float32) -> tuple[PyTree, jnp.ndarray]:
-    """Pack all leaves of ``tree`` into a single 1-D array.
+    """Pack all leaves of a pytree into a single 1-D array.
+
+    This function flattens all array leaves into a contiguous 1-D array,
+    which is useful for optimization algorithms that work on flat parameter
+    vectors or for efficient storage/transmission.
 
     Args:
-        tree: Pytree of array-like objects.
-        dtype: Desired dtype of the packed array.
+        tree: Pytree of array-like objects to pack.
+        dtype: Desired dtype of the packed array (default: jnp.float32).
 
     Returns:
-        A pair ``(offset_tree, flat_array)`` where ``offset_tree`` mirrors the
-        structure of ``tree`` but each leaf contains a :class:`PackedLeaf`
-        indicating where that leaf's data is stored in ``flat_array``.
+        tuple: A pair ``(offset_tree, flat_array)`` where:
+            - ``offset_tree`` has the same structure as ``tree`` but each
+              leaf is replaced with a :class:`PackedLeaf` containing offset
+              and shape information.
+            - ``flat_array`` is a 1-D array containing all leaf data.
+
+    Examples:
+        >>> tree = {"weights": jnp.ones((2, 3)), "bias": jnp.zeros(3)}
+        >>> offset_tree, packed = pack_pytree(tree)
+        >>> packed.shape
+        (9,)
+        >>> original = unpack_pytree(offset_tree, packed)
     """
 
     leaves, treedef = jax.tree_util.tree_flatten(tree)
@@ -2020,7 +2124,26 @@ def pack_pytree(tree: PyTree, dtype=jnp.float32) -> tuple[PyTree, jnp.ndarray]:
 
 
 def unpack_pytree(offset_tree: PyTree, packed: jnp.ndarray) -> PyTree:
-    """Reconstruct a pytree packed with :func:`pack_pytree`."""
+    """Reconstruct a pytree from its packed representation.
+
+    This is the inverse operation of :func:`pack_pytree`. It uses the
+    offset and shape information stored in offset_tree to extract and
+    reshape data from the packed array.
+
+    Args:
+        offset_tree: Tree of :class:`PackedLeaf` objects from pack_pytree.
+        packed: The 1-D array containing packed leaf data.
+
+    Returns:
+        PyTree: Reconstructed tree with original structure and array shapes.
+
+    Examples:
+        >>> tree = {"weights": jnp.ones((2, 3)), "bias": jnp.zeros(3)}
+        >>> offset_tree, packed = pack_pytree(tree)
+        >>> reconstructed = unpack_pytree(offset_tree, packed)
+        >>> jnp.allclose(tree["weights"], reconstructed["weights"])
+        True
+    """
 
     offset_leaves, treedef = jax.tree_util.tree_flatten(offset_tree)
     offset_leaves = [cast(PackedLeaf, x) for x in offset_leaves]
@@ -2035,11 +2158,25 @@ def unpack_pytree(offset_tree: PyTree, packed: jnp.ndarray) -> PyTree:
 
 
 def join_key(prefix, k):
-    """Concatenate ``prefix`` and key ``k`` using dot-notation.
+    """Concatenate a prefix and key using dot-notation.
 
-    Example:
+    Creates hierarchical key paths by joining components with dots.
+    Handles None keys and empty prefixes gracefully.
+
+    Args:
+        prefix: The prefix string (can be empty string).
+        k: The key to append (can be None).
+
+    Returns:
+        str: The joined key path.
+
+    Examples:
         >>> join_key('layer', 'weight')
         'layer.weight'
+        >>> join_key('', 'bias')
+        'bias'
+        >>> join_key('layer', None)
+        'layer'
     """
     if k is None:
         return prefix

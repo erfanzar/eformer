@@ -58,10 +58,94 @@ import contextlib2
 import jax
 import numpy as np
 from jax.experimental.mesh_utils import create_device_mesh, create_hybrid_device_mesh
-from jax.sharding import Mesh
+from jax.sharding import AxisType, Mesh
 
 DEFAULT_SHARDING_STG = (1, -1, 1, 1, 1)
 DEFAULT_NAMED_SHARDING_STG = ("dp", "fsdp", "ep", "tp", "sp")
+
+_AXIS_TYPE_BY_NAME = {
+    "auto": AxisType.Auto,
+    "explicit": AxisType.Explicit,
+    "manual": AxisType.Manual,
+}
+
+
+def _get_num_slices(devices: tp.Sequence[tp.Any]) -> int:
+    """Determine the number of slices in a multi-slice TPU configuration.
+
+    Inspects device objects for slice_index attributes (indicating TPU pod
+    slices) and falls back to the MEGASCALE_NUM_SLICES environment variable.
+
+    Args:
+        devices: Sequence of JAX device objects to inspect.
+
+    Returns:
+        The number of distinct slices detected, or 1 for single-slice setups.
+    """
+    num_slices = 1
+    if devices and hasattr(devices[0], "slice_index"):
+        try:
+            num_slices = len({d.slice_index for d in devices})
+        except Exception:
+            pass
+    if num_slices == 1:
+        num_slices = int(os.environ.get("MEGASCALE_NUM_SLICES", num_slices))
+    return num_slices
+
+
+def _normalize_axis_types(
+    axis_names: tp.Sequence[str],
+    axis_types: tp.Sequence[AxisType | str] | AxisType | str | None,
+) -> tuple[AxisType, ...] | None:
+    """Normalize axis types to a tuple of AxisType enums.
+
+    Converts various input formats (strings, single values, sequences) into
+    a consistent tuple of AxisType enum values that can be passed to mesh
+    creation functions.
+
+    Args:
+        axis_names: Sequence of axis names to determine required length.
+        axis_types: Axis type specification in one of these formats:
+            - None: Returns None (use defaults)
+            - Single AxisType or string: Applied to all axes
+            - Sequence of AxisType/strings: One per axis name
+
+    Returns:
+        Tuple of AxisType enums with same length as axis_names,
+        or None if input was None.
+
+    Raises:
+        ValueError: If string values are not valid axis type names or
+            if sequence length doesn't match axis_names length.
+        TypeError: If axis_types contains invalid types.
+    """
+    if axis_types is None:
+        return None
+    if isinstance(axis_types, (AxisType, str)):
+        axis_types_seq = (axis_types,) * len(axis_names)
+    else:
+        axis_types_seq = tuple(axis_types)
+        if len(axis_types_seq) == 1 and len(axis_names) > 1:
+            axis_types_seq = axis_types_seq * len(axis_names)
+    normalized = []
+    for axis_type in axis_types_seq:
+        if isinstance(axis_type, str):
+            key = axis_type.strip().lower()
+            if key not in _AXIS_TYPE_BY_NAME:
+                raise ValueError(
+                    f"axis_types must be one of {{'auto', 'explicit', 'manual'}} or AxisType, got {axis_type!r}."
+                )
+            normalized.append(_AXIS_TYPE_BY_NAME[key])
+        elif isinstance(axis_type, AxisType):
+            normalized.append(axis_type)
+        else:
+            raise TypeError(f"axis_types entries must be strings or AxisType values, got {type(axis_type)}.")
+    if len(normalized) != len(axis_names):
+        raise ValueError(
+            "axis_types length must match axis_names length. "
+            f"Got {len(normalized)} types for {len(axis_names)} axis names."
+        )
+    return tuple(normalized)
 
 
 def calculate_host_mesh_shape(
@@ -129,6 +213,7 @@ def calculate_host_mesh_shape(
 def _cached_mesh(
     axis_dims: tp.Sequence[int],
     axis_names: tp.Sequence[str],
+    axis_types: tp.Sequence[AxisType] | None = None,
     dcn_mesh_dims: tp.Sequence[int] | None = None,
     should_sort_granules_by_key: bool = True,
     allow_split_physical_axes: bool = True,
@@ -143,6 +228,7 @@ def _cached_mesh(
     Args:
         axis_dims: Dimensions for each mesh axis
         axis_names: Names for each mesh axis
+        axis_types: Optional mesh axis types for explicit/auto/manual sharding
         dcn_mesh_dims: Data center network mesh dimensions
         should_sort_granules_by_key: Whether to sort device granules
         allow_split_physical_axes: Whether to allow splitting physical axes
@@ -154,11 +240,13 @@ def _cached_mesh(
 
     axis_dims_t = tuple(axis_dims)
     axis_names_t = tuple(axis_names)
+    axis_types_t = None if axis_types is None else tuple(axis_types)
     dcn_mesh_dims_t = None if dcn_mesh_dims is None else tuple(dcn_mesh_dims)
     backend_s = backend or jax.default_backend()
     return _cached_mesh_impl(
         axis_dims=axis_dims_t,
         axis_names=axis_names_t,
+        axis_types=axis_types_t,
         dcn_mesh_dims=dcn_mesh_dims_t,
         should_sort_granules_by_key=should_sort_granules_by_key,
         allow_split_physical_axes=allow_split_physical_axes,
@@ -170,6 +258,7 @@ def _cached_mesh(
 def _cached_mesh_impl(
     axis_dims: tuple[int, ...],
     axis_names: tuple[str, ...],
+    axis_types: tuple[AxisType, ...] | None = None,
     dcn_mesh_dims: tuple[int, ...] | None = None,
     should_sort_granules_by_key: bool = True,
     allow_split_physical_axes: bool = True,
@@ -190,6 +279,7 @@ def _cached_mesh_impl(
     Args:
         axis_dims: Tuple of dimensions for each mesh axis
         axis_names: Tuple of names for each mesh axis
+        axis_types: Optional mesh axis types for explicit/auto/manual sharding
         dcn_mesh_dims: Data center network dimensions for hybrid setups
         should_sort_granules_by_key: Sort devices for consistency
         allow_split_physical_axes: Allow splitting physical device axes
@@ -207,14 +297,7 @@ def _cached_mesh_impl(
     process_count = jax.process_count()
     global_mesh_shape = np.arange(total_devices).reshape(axis_dims).shape
 
-    num_slices = 1
-    if devices and hasattr(devices[0], "slice_index"):
-        try:
-            num_slices = len({d.slice_index for d in devices})
-        except Exception:
-            pass
-    if num_slices == 1:
-        num_slices = int(os.environ.get("MEGASCALE_NUM_SLICES", num_slices))
+    num_slices = _get_num_slices(devices)
 
     def fill_minus_one_to_target(shape: tuple[int, ...], target: int) -> tuple[int, ...]:
         """Replace -1 in shape with value to match target product.
@@ -312,7 +395,7 @@ def _cached_mesh_impl(
             allow_split_physical_axes=allow_split_physical_axes,
         )
 
-    return Mesh(ndarray, axis_names)
+    return Mesh(ndarray, axis_names, axis_types=axis_types)
 
 
 def create_mesh(
@@ -322,7 +405,8 @@ def create_mesh(
     should_sort_granules_by_key: bool = True,
     allow_split_physical_axes: bool = True,
     backend: str | None = None,
-    use_jax: bool = True,
+    use_jax: bool = False,
+    axis_types: tp.Sequence[AxisType | str] | AxisType | str | None | tp.Literal["auto", "explicit", "manual"] = None,
 ) -> Mesh:
     """Create a JAX mesh for distributed computation.
 
@@ -336,15 +420,20 @@ def create_mesh(
         axis_names: Names for each axis. Default is ('dp', 'fsdp', 'ep', 'tp', 'sp')
             representing data, fully-sharded data, expert, tensor, and sequence
             parallelism respectively.
+        axis_types: Optional axis type(s) for mesh axes. Accepts AxisType values
+            or "auto", "explicit", "manual" strings. A single value is applied
+            to all axes.
         dcn_mesh_dims: Data center network mesh dimensions for hybrid device setups.
             If None, automatically calculated for multi-process environments.
-        process_is_granule: Whether to treat each process as an indivisible unit
-            in mesh creation.
         should_sort_granules_by_key: Whether to sort device granules for consistent
             ordering across processes.
         allow_split_physical_axes: Whether physical device axes can be split
             across logical mesh axes.
         backend: JAX backend ('cpu', 'gpu', 'tpu'). If None, uses default.
+        use_jax: If True, uses jax.make_mesh. If False, uses mesh_utils-based
+            explicit device mesh creation (including multi-slice support). When
+            True, multi-slice or multi-process topologies fall back to the
+            mesh_utils path for better topology support.
 
     Returns:
         JAX Mesh object ready for use with pjit and sharding specifications.
@@ -359,21 +448,24 @@ def create_mesh(
         >>> with mesh:
         ...     sharded_fn = pjit(fn, in_shardings=..., out_shardings=...)
     """
+    axis_types = _normalize_axis_types(axis_names, axis_types)
     if use_jax:
-        total_devices = jax.device_count(backend)
+        devices = jax.devices(backend)
+        num_slices = _get_num_slices(devices)
         process_count = jax.process_count()
-        axis_dims = np.arange(total_devices).reshape(axis_dims).shape
-
-        if dcn_mesh_dims is not None:
-            dcn_mesh_dims = np.arange(process_count).reshape(dcn_mesh_dims).shape
-            _new = ()
-            for a, d in zip(tuple(axis_dims), tuple(dcn_mesh_dims), strict=False):
-                _new = (*_new, a * d)
-            axis_dims = _new
-        return jax.make_mesh(axis_shapes=axis_dims, axis_names=axis_names)
+        if num_slices == 1 and process_count == 1 and dcn_mesh_dims is None:
+            total_devices = len(devices)
+            axis_dims = np.arange(total_devices).reshape(axis_dims).shape
+            return jax.make_mesh(
+                axis_shapes=axis_dims,
+                axis_names=axis_names,
+                axis_types=axis_types,
+                devices=devices,
+            )
     return _cached_mesh(
         axis_dims=axis_dims,
         axis_names=axis_names,
+        axis_types=axis_types,
         dcn_mesh_dims=dcn_mesh_dims,
         should_sort_granules_by_key=should_sort_granules_by_key,
         allow_split_physical_axes=allow_split_physical_axes,

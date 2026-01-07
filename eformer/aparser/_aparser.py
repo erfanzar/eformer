@@ -34,10 +34,30 @@ DataClassType = tp.NewType("DataClassType", tp.Any)
 
 
 def string_to_bool(v: str | bool) -> bool:
-    """
-    Convert a string to a boolean.
+    """Convert a string to a boolean.
 
     Accepts various string representations for truthy and falsy values.
+    Case-insensitive matching is used.
+
+    Args:
+        v: Value to convert. Can be a string or already a boolean.
+
+    Returns:
+        Boolean value corresponding to the input.
+
+    Raises:
+        ArgumentTypeError: If the string cannot be interpreted as boolean.
+
+    Example:
+        >>> string_to_bool("yes")
+        True
+        >>> string_to_bool("false")
+        False
+        >>> string_to_bool("1")
+        True
+
+    Accepted truthy values: "yes", "true", "t", "y", "1"
+    Accepted falsy values: "no", "false", "f", "n", "0"
     """
     if isinstance(v, bool):
         return v
@@ -52,8 +72,26 @@ def string_to_bool(v: str | bool) -> bool:
 
 
 def make_choice_type_function(choices: list[tp.Any]) -> tp.Callable[[str], tp.Any]:
-    """
-    Create a function that maps a string representation to an actual value from choices.
+    """Create a type converter function for argparse choices.
+
+    Creates a function that maps string representations back to their original
+    values from a list of choices. This is useful for Literal and Enum types
+    where argparse receives strings but the original values may be different types.
+
+    Args:
+        choices: List of valid choice values.
+
+    Returns:
+        A function that converts a string argument to its corresponding choice
+        value, or returns the original string if no match is found.
+
+    Example:
+        >>> converter = make_choice_type_function([1, 2, 3])
+        >>> converter("2")
+        2
+        >>> converter = make_choice_type_function(["small", "large"])
+        >>> converter("small")
+        'small'
     """
     str_to_choice = {str(choice): choice for choice in choices}
     return lambda arg: str_to_choice.get(arg, arg)
@@ -68,6 +106,44 @@ def Argu(
     metadata: dict | None = None,
     **kwargs,
 ) -> dataclasses.Field:
+    """Create a dataclass field with argument parsing metadata.
+
+    A convenience wrapper around dataclasses.field() that adds metadata for
+    command-line argument generation. Use this to specify help text, aliases,
+    and other argparse options for dataclass fields.
+
+    Args:
+        aliases: Alternative command-line names for this argument.
+                 Can be a single string or list of strings.
+                 Example: aliases=["-lr", "--rate"]
+        help: Help text displayed in --help output.
+        default: Default value for the field.
+        default_factory: Factory function for mutable default values.
+        metadata: Additional metadata dictionary to extend.
+        **kwargs: Additional arguments passed to dataclasses.field().
+
+    Returns:
+        A dataclass Field object with argument metadata.
+
+    Example:
+        >>> from dataclasses import dataclass
+        >>> from eformer.aparser import Argu, DataClassArgumentParser
+        >>>
+        >>> @dataclass
+        >>> class Config:
+        ...     learning_rate: float = Argu(
+        ...         default=1e-4,
+        ...         aliases=["-lr"],
+        ...         help="Learning rate for optimizer"
+        ...     )
+        ...     output_dir: str = Argu(
+        ...         default="./output",
+        ...         help="Directory for saving outputs"
+        ...     )
+        >>>
+        >>> parser = DataClassArgumentParser(Config)
+        >>> # Can use: --learning-rate 0.01 OR -lr 0.01
+    """
     if metadata is None:
         metadata = {}
     if aliases is not None:
@@ -79,11 +155,46 @@ def Argu(
 
 
 class DataClassArgumentParser(ArgumentParser):
-    """
-    A subclass of argparse.ArgumentParser that automatically generates arguments based on dataclass type hints.
+    """ArgumentParser that generates arguments from dataclass type hints.
 
-    It supports additional argparse features (like sub-groups) and can also load configuration
-    from dictionaries, JSON files, or YAML files.
+    This class extends argparse.ArgumentParser to automatically create command-line
+    arguments from dataclass field definitions. It supports multiple dataclasses,
+    various field types, and configuration loading from files.
+
+    Supported field types:
+        - Basic types: str, int, float, bool
+        - Optional types: Optional[T] / T | None
+        - Literal types: Literal["a", "b", "c"]
+        - Enum types: MyEnum with automatic choices
+        - List types: list[T] with nargs="+"
+
+    Special handling:
+        - Boolean fields get --no-{field} variants when default is True
+        - Fields with underscores also accept hyphenated names
+        - Aliases can be specified via Argu() metadata
+
+    Attributes:
+        dataclass_types: List of dataclass types to generate arguments for.
+
+    Example:
+        >>> from dataclasses import dataclass
+        >>> from typing import Literal
+        >>>
+        >>> @dataclass
+        >>> class TrainConfig:
+        ...     batch_size: int = 32
+        ...     learning_rate: float = 1e-4
+        ...     optimizer: Literal["adam", "sgd"] = "adam"
+        ...     use_amp: bool = True
+        >>>
+        >>> parser = DataClassArgumentParser(TrainConfig)
+        >>> config, = parser.parse_args_into_dataclasses(["--batch-size", "64"])
+        >>> print(config.batch_size)
+        64
+
+    Multiple dataclasses:
+        >>> parser = DataClassArgumentParser([TrainConfig, ModelConfig])
+        >>> train_cfg, model_cfg = parser.parse_args_into_dataclasses()
     """
 
     dataclass_types: tp.Iterable[DataClassType]
@@ -93,6 +204,14 @@ class DataClassArgumentParser(ArgumentParser):
         dataclass_types: DataClassType | tp.Iterable[DataClassType],
         **kwargs: tp.Any,
     ) -> None:
+        """Initialize the parser with one or more dataclass types.
+
+        Args:
+            dataclass_types: A single dataclass type or iterable of dataclass types.
+                            Arguments are generated from all provided dataclasses.
+            **kwargs: Additional arguments passed to ArgumentParser.
+                     Defaults to ArgumentDefaultsHelpFormatter if not specified.
+        """
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = ArgumentDefaultsHelpFormatter
         super().__init__(**kwargs)
@@ -104,8 +223,18 @@ class DataClassArgumentParser(ArgumentParser):
 
     @staticmethod
     def _parse_dataclass_field(parser: ArgumentParser, field: dataclasses.Field) -> None:
-        """
-        Convert a dataclass field into a corresponding argparse argument.
+        """Convert a dataclass field into a corresponding argparse argument.
+
+        Handles type conversion, default values, choices, and special cases
+        like boolean flags and Optional types.
+
+        Args:
+            parser: ArgumentParser or argument group to add the argument to.
+            field: Dataclass field to convert.
+
+        Raises:
+            RuntimeError: If the field has an unresolved string type annotation.
+            ValueError: If the field has an unsupported Union type.
         """
 
         long_options = [f"--{field.name}"]
@@ -195,8 +324,16 @@ class DataClassArgumentParser(ArgumentParser):
             )
 
     def _add_dataclass_arguments(self, dtype: DataClassType) -> None:
-        """
-        Add arguments for all 'init'-enabled fields of a dataclass.
+        """Add arguments for all init-enabled fields of a dataclass.
+
+        Fields with init=False are skipped. If the dataclass has an
+        _argument_group_name attribute, arguments are added to a named group.
+
+        Args:
+            dtype: Dataclass type to add arguments for.
+
+        Raises:
+            RuntimeError: If type hints cannot be resolved for the dataclass.
         """
         group_name = getattr(dtype, "_argument_group_name", None)
         parser = self.add_argument_group(group_name) if group_name else self
@@ -231,14 +368,35 @@ class DataClassArgumentParser(ArgumentParser):
         args_filename: str | None = None,
         args_file_flag: str | None = None,
     ) -> tuple[tp.Any, ...]:
-        """
-        Parse command-line arguments into instances of the specified dataclass types.
+        """Parse command-line arguments into dataclass instances.
 
-        Optionally, this method can also look for an external ".args" file or a command-line flag that points
-        to one, and prepend its content to the command-line arguments.
+        Parses arguments and constructs instances of all registered dataclass
+        types. Supports loading additional arguments from files.
+
+        Args:
+            args: List of argument strings. If None, uses sys.argv[1:].
+            return_remaining_strings: If True, include unparsed arguments in output.
+            look_for_args_file: If True, look for a .args file matching the script name.
+            args_filename: Explicit path to an args file to load.
+            args_file_flag: Command-line flag for specifying args file(s).
+
+        Returns:
+            Tuple of dataclass instances, one per registered dataclass type.
+            If return_remaining_strings is True, the last element is a list
+            of unparsed argument strings.
 
         Raises:
-            ValueError: If there are any unknown arguments (and return_remaining_strings is False).
+            ValueError: If there are unknown arguments and return_remaining_strings
+                       is False.
+
+        Example:
+            >>> parser = DataClassArgumentParser([TrainConfig, ModelConfig])
+            >>> train, model = parser.parse_args_into_dataclasses()
+            >>>
+            >>> # With remaining args
+            >>> train, model, remaining = parser.parse_args_into_dataclasses(
+            ...     return_remaining_strings=True
+            ... )
         """
         if args_file_flag or args_filename or (look_for_args_file and sys.argv):
             args_files: list[Path] = []
@@ -284,12 +442,27 @@ class DataClassArgumentParser(ArgumentParser):
         return tuple(outputs)
 
     def parse_dict(self, args: dict[str, tp.Any], allow_extra_keys: bool = False) -> tuple[tp.Any, ...]:
-        """
-        Parse a dictionary of configuration values into dataclass instances.
+        """Parse a dictionary of configuration values into dataclass instances.
+
+        Useful for programmatic configuration or loading from config files.
 
         Args:
-            args: Dictionary containing configuration values.
-            allow_extra_keys: If False, raises an exception if unknown keys are present.
+            args: Dictionary with keys matching dataclass field names.
+            allow_extra_keys: If True, ignore keys that don't match any field.
+                            If False, raise ValueError for unknown keys.
+
+        Returns:
+            Tuple of dataclass instances, one per registered dataclass type.
+
+        Raises:
+            ValueError: If allow_extra_keys is False and unknown keys are present.
+
+        Example:
+            >>> parser = DataClassArgumentParser(TrainConfig)
+            >>> config, = parser.parse_dict({
+            ...     "learning_rate": 0.001,
+            ...     "batch_size": 64
+            ... })
         """
         unused_keys = set(args.keys())
         outputs = []
@@ -307,8 +480,24 @@ class DataClassArgumentParser(ArgumentParser):
         json_file: str | os.PathLike,
         allow_extra_keys: bool = False,
     ) -> tuple[tp.Any, ...]:
-        """
-        Load a JSON file and parse it into dataclass instances.
+        """Load a JSON file and parse it into dataclass instances.
+
+        Args:
+            json_file: Path to the JSON configuration file.
+                      Supports both local paths and GCS paths (gs://).
+            allow_extra_keys: If True, ignore keys that don't match any field.
+
+        Returns:
+            Tuple of dataclass instances, one per registered dataclass type.
+
+        Raises:
+            FileNotFoundError: If the JSON file doesn't exist.
+            json.JSONDecodeError: If the file contains invalid JSON.
+            ValueError: If allow_extra_keys is False and unknown keys are present.
+
+        Example:
+            >>> parser = DataClassArgumentParser(TrainConfig)
+            >>> config, = parser.parse_json_file("config.json")
         """
         data = json.loads(ePath(json_file).read_text())
         return self.parse_dict(data, allow_extra_keys=allow_extra_keys)
@@ -318,8 +507,23 @@ class DataClassArgumentParser(ArgumentParser):
         yaml_file: str | os.PathLike,
         allow_extra_keys: bool = False,
     ) -> tuple[tp.Any, ...]:
-        """
-        Load a YAML file and parse it into dataclass instances.
+        """Load a YAML file and parse it into dataclass instances.
+
+        Args:
+            yaml_file: Path to the YAML configuration file.
+            allow_extra_keys: If True, ignore keys that don't match any field.
+
+        Returns:
+            Tuple of dataclass instances, one per registered dataclass type.
+
+        Raises:
+            FileNotFoundError: If the YAML file doesn't exist.
+            yaml.YAMLError: If the file contains invalid YAML.
+            ValueError: If allow_extra_keys is False and unknown keys are present.
+
+        Example:
+            >>> parser = DataClassArgumentParser(TrainConfig)
+            >>> config, = parser.parse_yaml_file("config.yaml")
         """
         yaml_text = Path(yaml_file).read_text(encoding="utf-8")
         data = yaml.safe_load(yaml_text)

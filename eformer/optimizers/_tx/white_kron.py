@@ -29,13 +29,37 @@ from optax._src.utils import canonicalize_dtype
 
 from eformer.pytree import auto_pytree, field
 
-DENSE_PATH = 0
-LARGE_PATH = 1
-ONE_D_PATH = 2
+# Path type constants for parameter classification
+DENSE_PATH = 0  # Parameters processed with full dense Kronecker factors
+LARGE_PATH = 1  # Large parameters processed with mixed dense/diagonal factors
+ONE_D_PATH = 2  # 1D parameters processed with diagonal-only factors
 
 
 @auto_pytree
 class DenseState:
+    """State container for dense Kronecker-factored preconditioner blocks.
+
+    This class stores the concatenated preconditioner matrices for all dense
+    parameter blocks in the model. Dense blocks are small enough to use full
+    matrix Kronecker factors rather than diagonal approximations.
+
+    Attributes:
+        Ql (jax.Array): Left Kronecker factors, shape [num_blocks, block_size, block_size].
+            These are orthogonal/near-orthogonal matrices for left preconditioning.
+        Qr (jax.Array): Right Kronecker factors, shape [num_blocks, block_size, block_size].
+            These are orthogonal/near-orthogonal matrices for right preconditioning.
+        Ll (jax.Array): Lipschitz estimates for left factors, shape [num_blocks].
+            Used for adaptive learning rate scaling.
+        Lr (jax.Array): Lipschitz estimates for right factors, shape [num_blocks].
+            Used for adaptive learning rate scaling.
+        valid_rows (jax.Array): Number of valid rows in each block, shape [num_blocks].
+            Accounts for padding when original dimensions are not multiples of block_size.
+        valid_cols (jax.Array): Number of valid columns in each block, shape [num_blocks].
+            Accounts for padding when original dimensions are not multiples of block_size.
+        valid_count (int): Number of actual (non-padding) blocks in the state.
+        block_size (int): Size of each square block in the Kronecker factorization.
+    """
+
     Ql: jax.Array
     Qr: jax.Array
     Ll: jax.Array
@@ -48,6 +72,36 @@ class DenseState:
 
 @auto_pytree
 class LeafState:
+    """State container for a single parameter leaf in the White Kron optimizer.
+
+    This class stores the preconditioner state for individual parameter tensors,
+    supporting different processing paths based on parameter size and shape.
+
+    The optimizer handles three types of parameters:
+        - DENSE_PATH: Small 2D parameters use full dense Kronecker factors
+        - LARGE_PATH: Large 2D parameters use mixed dense/diagonal factors
+        - ONE_D_PATH: 1D parameters use diagonal-only preconditioners
+
+    Attributes:
+        kind (int): Processing path type (DENSE_PATH, LARGE_PATH, or ONE_D_PATH).
+        scanned (int): Whether this parameter is part of a scanned layer (0 or 1).
+        B (int): Batch dimension size (number of stacked parameter matrices).
+        shape (tuple[int, ...] | None): Original parameter shape (excluding batch dim).
+        merged (tuple[int, ...] | None): Shape after merging dimensions to 2D (m, n).
+        nr (int | None): Number of row blocks when using blocked processing.
+        nc (int | None): Number of column blocks when using blocked processing.
+        block_size (int | None): Block size for blocked processing.
+        diag_left (bool | None): Whether left factor uses diagonal approximation.
+        diag_right (bool | None): Whether right factor uses diagonal approximation.
+        stack (int | None): Total number of stacked blocks for parallel processing.
+        Ql (jax.Array | None): Left Kronecker factor(s).
+        Qr (jax.Array | None): Right Kronecker factor(s).
+        Ll (jax.Array | None): Left Lipschitz estimates.
+        Lr (jax.Array | None): Right Lipschitz estimates.
+        valid_rows (jax.Array | None): Valid row counts per block.
+        valid_cols (jax.Array | None): Valid column counts per block.
+    """
+
     kind: int = field(pytree_node=False)
     scanned: int = field(pytree_node=False)
     B: int = field(pytree_node=False)
@@ -83,6 +137,56 @@ def _def_scale(
     params_partition_specs: PartitionSpec | list | tuple | dict | None = None,
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
+    """Create a White Kron gradient scaling transformation.
+
+    This is the core implementation for White Kron optimizers (Quad and Skew).
+    It applies Kronecker-factored preconditioning to gradients using an online
+    learning approach to maintain the preconditioner matrices.
+
+    The optimizer classifies parameters into three categories:
+        - Dense: Small 2D parameters (both dims <= max_size_dense) use full matrix factors
+        - Large: Large 2D parameters use mixed dense/diagonal factors
+        - 1D: Scalar and 1D parameters use diagonal-only preconditioning
+
+    Args:
+        lr_style (str | None): Learning rate scaling style. "adam" divides updates by 5.0
+            for Adam-like behavior. None uses raw preconditioned gradients. Defaults to "adam".
+        b1 (float): Momentum coefficient for exponential moving average of gradients.
+            Set to 0 to disable momentum. Defaults to 0.95.
+        normalize_grads (bool): Whether to normalize gradients to unit norm before
+            preconditioning. Can help with stability. Defaults to False.
+        max_size_dense (int): Maximum dimension size for dense Kronecker factors.
+            Parameters with both dimensions <= this value use full matrix factors.
+            Larger parameters use diagonal approximations. Defaults to 16384.
+        preconditioner_lr (float): Learning rate for preconditioner updates.
+            Controls how quickly the preconditioner adapts. Defaults to 0.7.
+        preconditioner_init_scale (float): Initial scale for preconditioner matrices.
+            Identity matrices are scaled by this value. Defaults to 1.0.
+        preconditioner_update_style (Literal["QUAD", "skew"]): Update rule for
+            preconditioners. "QUAD" uses quadratic updates, "skew" uses Procrustes
+            orthogonalization. Defaults to "skew".
+        dtype (str | jnp.dtype): Data type for preconditioner storage. Must be
+            bfloat16 or float32. Defaults to jnp.bfloat16.
+        scanned_layers (base.Params | None): PyTree indicating which parameters are
+            from scanned layers (True) vs regular layers (False). Defaults to None.
+        block_size (int): Block size for blocking large matrices. Controls memory
+            and compute tradeoffs. Defaults to 256.
+        pipeline_axis_name (str | None): Name of the pipeline parallel axis for
+            sharding preconditioner state. Defaults to None.
+        pipeline_axis_size (int): Size of the pipeline parallel axis. Defaults to 1.
+        params_partition_specs (PartitionSpec | list | tuple | dict | None): Partition
+            specs for model parameters. Used to maintain sharding of momentum. Defaults to None.
+        noise_scale (float): Scale of random noise added to gradients for numerical
+            stability. Defaults to 1e-9.
+
+    Returns:
+        base.GradientTransformation: Gradient transformation implementing White Kron
+            preconditioning.
+
+    Raises:
+        ValueError: If dtype is not bfloat16 or float32.
+        ValueError: If preconditioner_update_style is not "QUAD" or "skew".
+    """
     dtype = canonicalize_dtype(dtype)
     if dtype not in (jnp.bfloat16, jnp.float32):
         raise ValueError("dtype must be bfloat16 or float32")
@@ -732,6 +836,39 @@ def scale_by_skew(
     params_partition_specs: PartitionSpec | list | tuple | dict | None = None,
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
+    """Create a gradient scaling transformation using skew-style preconditioner updates.
+
+    The skew variant of White Kron uses Procrustes orthogonalization to maintain
+    near-orthogonal preconditioner matrices, which can provide more stable training.
+
+    Args:
+        lr_style (str | None): Learning rate scaling style. "adam" for Adam-like scaling.
+            Defaults to "adam".
+        b1 (float): Momentum coefficient. Defaults to 0.95.
+        normalize_grads (bool): Whether to normalize gradients. Defaults to False.
+        max_size_dense (int): Max dimension for dense factors. Defaults to 16384.
+        preconditioner_lr (float): Preconditioner learning rate. Defaults to 0.7.
+        preconditioner_init_scale (float): Initial preconditioner scale. Defaults to 1.0.
+        dtype (str | jnp.dtype): Storage dtype. Defaults to jnp.bfloat16.
+        scanned_layers (base.Params | None): Scanned layer indicators. Defaults to None.
+        block_size (int): Block size for matrix partitioning. Defaults to 256.
+        pipeline_axis_name (str | None): Pipeline axis name. Defaults to None.
+        pipeline_axis_size (int): Pipeline axis size. Defaults to 1.
+        params_partition_specs: Parameter partition specs. Defaults to None.
+        noise_scale (float): Noise scale for stability. Defaults to 1e-9.
+
+    Returns:
+        base.GradientTransformation: Skew-style preconditioned gradient transformation.
+
+    Example:
+        >>> import optax
+        >>> from eformer.optimizers._tx import scale_by_skew
+        >>> optimizer = optax.chain(
+        ...     scale_by_skew(b1=0.95),
+        ...     optax.add_decayed_weights(0.1),
+        ...     optax.scale_by_learning_rate(1e-4),
+        ... )
+    """
     return _def_scale(
         lr_style=lr_style,
         b1=b1,
@@ -765,6 +902,39 @@ def scale_by_quad(
     params_partition_specs: PartitionSpec | list | tuple | dict | None = None,
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
+    """Create a gradient scaling transformation using QUAD-style preconditioner updates.
+
+    The QUAD variant of White Kron uses quadratic preconditioner updates that
+    directly minimize a quadratic loss in the preconditioner space.
+
+    Args:
+        lr_style (str | None): Learning rate scaling style. "adam" for Adam-like scaling.
+            Defaults to "adam".
+        b1 (float): Momentum coefficient. Defaults to 0.95.
+        normalize_grads (bool): Whether to normalize gradients. Defaults to False.
+        max_size_dense (int): Max dimension for dense factors. Defaults to 16384.
+        preconditioner_lr (float): Preconditioner learning rate. Defaults to 0.7.
+        preconditioner_init_scale (float): Initial preconditioner scale. Defaults to 1.0.
+        dtype (str | jnp.dtype): Storage dtype. Defaults to jnp.bfloat16.
+        scanned_layers (base.Params | None): Scanned layer indicators. Defaults to None.
+        block_size (int): Block size for matrix partitioning. Defaults to 256.
+        pipeline_axis_name (str | None): Pipeline axis name. Defaults to None.
+        pipeline_axis_size (int): Pipeline axis size. Defaults to 1.
+        params_partition_specs: Parameter partition specs. Defaults to None.
+        noise_scale (float): Noise scale for stability. Defaults to 1e-9.
+
+    Returns:
+        base.GradientTransformation: QUAD-style preconditioned gradient transformation.
+
+    Example:
+        >>> import optax
+        >>> from eformer.optimizers._tx import scale_by_quad
+        >>> optimizer = optax.chain(
+        ...     scale_by_quad(b1=0.95),
+        ...     optax.add_decayed_weights(0.1),
+        ...     optax.scale_by_learning_rate(1e-4),
+        ... )
+    """
     return _def_scale(
         lr_style=lr_style,
         b1=b1,
@@ -801,6 +971,43 @@ def skew(
     params_partition_specs: PartitionSpec | list | tuple | dict | None = None,
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
+    """Complete Skew optimizer with weight decay and learning rate scheduling.
+
+    Skew is a Kronecker-factored preconditioned optimizer using Procrustes
+    orthogonalization to maintain near-orthogonal preconditioner matrices.
+    This provides efficient second-order optimization with stable training.
+
+    Args:
+        learning_rate (float | Callable[[int], float]): Learning rate or schedule.
+            Defaults to 0.001.
+        lr_style (str | None): Learning rate scaling style. Defaults to "adam".
+        b1 (float): Momentum coefficient. Defaults to 0.95.
+        weight_decay (float): Weight decay coefficient. Defaults to 0.1.
+        weight_decay_mask: Mask for selective weight decay. Defaults to None.
+        normalize_grads (bool): Whether to normalize gradients. Defaults to False.
+        max_size_dense (int): Max dimension for dense factors. Defaults to 16384.
+        preconditioner_lr (float): Preconditioner learning rate. Defaults to 0.7.
+        preconditioner_init_scale (float): Initial preconditioner scale. Defaults to 1.0.
+        dtype (str | jnp.dtype): Storage dtype. Defaults to jnp.bfloat16.
+        scanned_layers (base.Params | None): Scanned layer indicators. Defaults to None.
+        block_size (int): Block size for matrix partitioning. Defaults to 256.
+        pipeline_axis_name (str | None): Pipeline axis name. Defaults to None.
+        pipeline_axis_size (int): Pipeline axis size. Defaults to 1.
+        params_partition_specs: Parameter partition specs. Defaults to None.
+        noise_scale (float): Noise scale for stability. Defaults to 1e-9.
+
+    Returns:
+        base.GradientTransformation: Complete Skew optimizer transformation.
+
+    Example:
+        >>> from eformer.optimizers._tx import skew
+        >>> # With constant learning rate
+        >>> optimizer = skew(learning_rate=1e-4, b1=0.95, weight_decay=0.1)
+        >>> # With learning rate schedule
+        >>> import optax
+        >>> schedule = optax.cosine_decay_schedule(1e-4, 10000)
+        >>> optimizer = skew(learning_rate=schedule)
+    """
     tx = [
         scale_by_skew(
             lr_style=lr_style,
@@ -842,6 +1049,43 @@ def quad(
     params_partition_specs: PartitionSpec | list | tuple | dict | None = None,
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
+    """Complete Quad optimizer with weight decay and learning rate scheduling.
+
+    Quad is a Kronecker-factored preconditioned optimizer using quadratic
+    preconditioner updates that minimize a quadratic loss function.
+    This provides efficient second-order optimization.
+
+    Args:
+        learning_rate (float | Callable[[int], float]): Learning rate or schedule.
+            Defaults to 0.001.
+        lr_style (str | None): Learning rate scaling style. Defaults to "adam".
+        b1 (float): Momentum coefficient. Defaults to 0.95.
+        weight_decay (float): Weight decay coefficient. Defaults to 0.1.
+        weight_decay_mask: Mask for selective weight decay. Defaults to None.
+        normalize_grads (bool): Whether to normalize gradients. Defaults to False.
+        max_size_dense (int): Max dimension for dense factors. Defaults to 16384.
+        preconditioner_lr (float): Preconditioner learning rate. Defaults to 0.7.
+        preconditioner_init_scale (float): Initial preconditioner scale. Defaults to 1.0.
+        dtype (str | jnp.dtype): Storage dtype. Defaults to jnp.bfloat16.
+        scanned_layers (base.Params | None): Scanned layer indicators. Defaults to None.
+        block_size (int): Block size for matrix partitioning. Defaults to 256.
+        pipeline_axis_name (str | None): Pipeline axis name. Defaults to None.
+        pipeline_axis_size (int): Pipeline axis size. Defaults to 1.
+        params_partition_specs: Parameter partition specs. Defaults to None.
+        noise_scale (float): Noise scale for stability. Defaults to 1e-9.
+
+    Returns:
+        base.GradientTransformation: Complete Quad optimizer transformation.
+
+    Example:
+        >>> from eformer.optimizers._tx import quad
+        >>> # With constant learning rate
+        >>> optimizer = quad(learning_rate=1e-4, b1=0.95, weight_decay=0.1)
+        >>> # With learning rate schedule
+        >>> import optax
+        >>> schedule = optax.cosine_decay_schedule(1e-4, 10000)
+        >>> optimizer = quad(learning_rate=schedule)
+    """
     tx = [
         scale_by_quad(
             lr_style=lr_style,
@@ -866,6 +1110,47 @@ def quad(
 
 
 def get_opt_state_partition_specs(params, **quad_kwargs):
+    """Generate partition specs for White Kron optimizer state.
+
+    This utility function creates JAX partition specifications for the optimizer
+    state, enabling proper sharding of the optimizer state across devices in
+    distributed training scenarios.
+
+    Args:
+        params: Model parameters, used to infer state structure and shapes.
+        **quad_kwargs: Keyword arguments for the Quad/Skew optimizer, including:
+            - lr_style: Learning rate scaling style
+            - b1: Momentum coefficient
+            - normalize_grads: Whether to normalize gradients
+            - max_size_dense: Max dimension for dense factors
+            - preconditioner_lr: Preconditioner learning rate
+            - preconditioner_init_scale: Initial preconditioner scale
+            - dtype: Storage dtype
+            - scanned_layers: Scanned layer indicators
+            - block_size: Block size for matrix partitioning
+            - pipeline_axis_name: Pipeline axis name for sharding
+            - pipeline_axis_size: Pipeline axis size
+            - params_partition_specs: Parameter partition specs
+            - noise_scale: Noise scale for stability
+            - weight_decay: Weight decay coefficient (used to determine state structure)
+
+    Returns:
+        tuple: Partition specs for the optimizer state. Structure depends on
+            whether weight decay is enabled:
+            - With weight decay > 0: (precond_specs, None, None)
+            - Without weight decay: (precond_specs, None)
+
+    Example:
+        >>> import jax.numpy as jnp
+        >>> from eformer.optimizers._tx.white_kron import get_opt_state_partition_specs
+        >>> params = {"layer1": jnp.zeros((128, 64)), "layer2": jnp.zeros((64, 32))}
+        >>> specs = get_opt_state_partition_specs(
+        ...     params,
+        ...     pipeline_axis_name="dp",
+        ...     pipeline_axis_size=4,
+        ...     weight_decay=0.1,
+        ... )
+    """
     _allowed = {
         "lr_style",
         "b1",
@@ -963,10 +1248,23 @@ def get_opt_state_partition_specs(params, **quad_kwargs):
         return (precond_specs, None)
 
 
+# Lipschitz estimate decay rate for preconditioner updates
 betaL = 0.95
 
 
 def _diag_update(term1, term2, L, Q, lr_precond):
+    """Update diagonal preconditioner using QUAD-style update.
+
+    Args:
+        term1: Diagonal term from gradient outer product.
+        term2: Normalization term (total elements / dimension).
+        L: Current Lipschitz estimate.
+        Q: Current diagonal preconditioner.
+        lr_precond: Preconditioner learning rate.
+
+    Returns:
+        tuple: (updated_Q, updated_L) - New preconditioner and Lipschitz estimate.
+    """
     ell = jnp.max(term1) + term2
     L = jnp.maximum(betaL * L + (1 - betaL) * ell, ell)
     z = (lr_precond / (2.0 * L)).astype(Q.dtype)
@@ -976,6 +1274,21 @@ def _diag_update(term1, term2, L, Q, lr_precond):
 
 
 def _diag_update_q0p5eq1p5(term1, term2, L, Q, lr_precond):
+    """Update diagonal preconditioner using skew-style update.
+
+    This variant uses a linear gain update rather than quadratic, providing
+    different stability characteristics.
+
+    Args:
+        term1: Diagonal term from gradient outer product.
+        term2: Normalization term (total elements / dimension).
+        L: Current Lipschitz estimate.
+        Q: Current diagonal preconditioner.
+        lr_precond: Preconditioner learning rate.
+
+    Returns:
+        tuple: (updated_Q, updated_L) - New preconditioner and Lipschitz estimate.
+    """
     ell = jnp.max(term1) + term2
     L = jnp.maximum(betaL * L + (1 - betaL) * ell, ell)
     z = (lr_precond / L).astype(Q.dtype)
@@ -985,6 +1298,22 @@ def _diag_update_q0p5eq1p5(term1, term2, L, Q, lr_precond):
 
 
 def _norm_lower_bound(key, A, k=4, iters=5, skh=False):
+    """Estimate a lower bound on the spectral norm of a matrix.
+
+    Uses randomized power iteration to efficiently estimate the spectral norm
+    without computing a full SVD.
+
+    Args:
+        key: JAX random key for initialization.
+        A: Input matrix to estimate norm of.
+        k: Number of random vectors to use. Defaults to 4.
+        iters: Number of power iterations. Defaults to 5.
+        skh: If True, use max absolute value scaling; otherwise use diagonal scaling.
+            Defaults to False.
+
+    Returns:
+        float: Lower bound estimate of the spectral norm of A.
+    """
     if skh:
         scale = jnp.max(jnp.abs(A))
     else:
@@ -1003,6 +1332,22 @@ def _norm_lower_bound(key, A, k=4, iters=5, skh=False):
 
 
 def _dense_update(key, term1, term2, L, Q, lr_precond):
+    """Update dense preconditioner using QUAD-style update.
+
+    Performs a symmetric update step that preserves positive definiteness
+    of the preconditioner matrix.
+
+    Args:
+        key: JAX random key for norm estimation.
+        term1: Matrix term from gradient outer product.
+        term2: Normalization term.
+        L: Current Lipschitz estimate.
+        Q: Current dense preconditioner matrix.
+        lr_precond: Preconditioner learning rate.
+
+    Returns:
+        tuple: (updated_Q, updated_L) - New preconditioner and Lipschitz estimate.
+    """
     ell = _norm_lower_bound(key, term1) + term2
     L = jnp.maximum(betaL * L + (1 - betaL) * ell, ell)
     z = (lr_precond / (2.0 * L)).astype(Q.dtype)
@@ -1013,6 +1358,22 @@ def _dense_update(key, term1, term2, L, Q, lr_precond):
 
 
 def _dense_update_q0p5eq1p5(key, term1, term2, L, Q, lr_precond):
+    """Update dense preconditioner using skew-style update with Procrustes step.
+
+    This variant uses a Procrustes orthogonalization step to maintain near-orthogonal
+    preconditioner matrices, which can provide more stable training.
+
+    Args:
+        key: JAX random key for norm estimation and Procrustes step.
+        term1: Matrix term from gradient outer product.
+        term2: Normalization term.
+        L: Current Lipschitz estimate.
+        Q: Current dense preconditioner matrix.
+        lr_precond: Preconditioner learning rate.
+
+    Returns:
+        tuple: (updated_Q, updated_L) - New preconditioner and Lipschitz estimate.
+    """
     key1, key2 = jax.random.split(key)
     ell = _norm_lower_bound(key1, term1) + term2
     L = jnp.maximum(betaL * L + (1 - betaL) * ell, ell)
@@ -1023,6 +1384,19 @@ def _dense_update_q0p5eq1p5(key, term1, term2, L, Q, lr_precond):
 
 
 def _procrustes_step(key, Q, max_step_size=1 / 8):
+    """Perform a Procrustes orthogonalization step on a matrix.
+
+    Projects Q towards the nearest orthogonal matrix using a gradient step
+    on the skew-symmetric component of Q.
+
+    Args:
+        key: JAX random key for norm estimation.
+        Q: Input matrix to orthogonalize.
+        max_step_size: Maximum step size for the rotation update. Defaults to 1/8.
+
+    Returns:
+        jax.Array: Updated matrix closer to orthogonal.
+    """
     R = Q.T - Q
     max_abs = jnp.max(jnp.abs(R))
 
@@ -1058,6 +1432,30 @@ def _preconditioning(
     diag_update_fn: Callable,
     dense_update_fn: Callable,
 ):
+    """Apply Kronecker-factored preconditioning to a gradient matrix.
+
+    This is the core preconditioning function that handles all combinations of
+    dense/diagonal left and right factors.
+
+    Args:
+        key: JAX random key for noise injection and norm estimation.
+        Ql: Left Kronecker factor (matrix or diagonal vector).
+        Qr: Right Kronecker factor (matrix or diagonal vector).
+        Ll: Left Lipschitz estimate.
+        Lr: Right Lipschitz estimate.
+        G: Gradient matrix to precondition.
+        valid_shape: Array of [valid_rows, valid_cols] for handling padding.
+        diag_left: Whether left factor is diagonal.
+        diag_right: Whether right factor is diagonal.
+        lr_precond: Preconditioner learning rate.
+        noise_scale: Scale of noise added for numerical stability.
+        diag_update_fn: Function for diagonal factor updates.
+        dense_update_fn: Function for dense factor updates.
+
+    Returns:
+        tuple: (Ql_new, Qr_new, Ll_new, Lr_new, Pg_out) containing updated factors,
+            Lipschitz estimates, and the preconditioned gradient.
+    """
     key1, key2 = jax.random.split(key)
     m, n = valid_shape[0], valid_shape[1]
     noise = jax.random.normal(key2, G.shape, G.dtype) * noise_scale
@@ -1125,6 +1523,23 @@ def _preconditioning(
 
 
 def _preconditioning_one_d(key, Q, L, G, lr_precond, noise_scale, diag_update_fn):
+    """Apply diagonal preconditioning to a 1D gradient vector.
+
+    Simplified preconditioning for 1D parameters using only diagonal factors.
+
+    Args:
+        key: JAX random key for noise injection.
+        Q: Diagonal preconditioner vector.
+        L: Current Lipschitz estimate.
+        G: 1D gradient vector to precondition.
+        lr_precond: Preconditioner learning rate.
+        noise_scale: Scale of noise added for stability.
+        diag_update_fn: Function for diagonal factor updates.
+
+    Returns:
+        tuple: (Q_new, L_new, Pg_out) containing updated preconditioner,
+            Lipschitz estimate, and preconditioned gradient.
+    """
     noise = jax.random.normal(key, G.shape, G.dtype) * noise_scale
     Gn = G + noise
     Pg = Q * Q * Gn
@@ -1136,6 +1551,19 @@ def _preconditioning_one_d(key, Q, L, G, lr_precond, noise_scale, diag_update_fn
 
 
 def _balance_qs(Ql, Qr):
+    """Balance the scales of left and right Kronecker factors.
+
+    Normalizes the factors so that their maximum absolute values are equal,
+    preventing numerical issues from unbalanced factor scales.
+
+    Args:
+        Ql: Left Kronecker factors, shape [batch, ...].
+        Qr: Right Kronecker factors, shape [batch, ...].
+
+    Returns:
+        tuple: (balanced_Ql, balanced_Qr) with equalized scales.
+    """
+
     @vmap
     def _balance_sample(ql, qr):
         nl = jnp.max(jnp.abs(ql))
@@ -1149,9 +1577,19 @@ def _balance_qs(Ql, Qr):
 
 
 def _block2d(x, block_size):
-    """Block each [m, n] in a [B, m, n] tensor to blocks of [bs, bs].
+    """Block each [m, n] matrix in a [B, m, n] tensor into fixed-size blocks.
 
-    Returns blocks with shape [B * nr * nc, bs, bs] and meta (nr, nc, m, n).
+    Partitions each 2D matrix into non-overlapping blocks of size [block_size, block_size],
+    padding as necessary. Useful for parallel processing of large matrices.
+
+    Args:
+        x: Input tensor of shape [B, m, n] containing B matrices.
+        block_size: Size of square blocks to partition into.
+
+    Returns:
+        tuple: (blocks, meta) where:
+            - blocks: Array of shape [B * nr * nc, block_size, block_size]
+            - meta: Tuple (nr, nc, m, n) with grid dimensions and original shape
     """
     B, m, n = x.shape
     nr, nc = (m + block_size - 1) // block_size, (n + block_size - 1) // block_size
@@ -1164,9 +1602,15 @@ def _block2d(x, block_size):
 
 
 def _unblock2d(blocks, meta, block_size):
-    """Inverse of _block2d_full_batched.
+    """Reconstruct matrices from blocked representation (inverse of _block2d).
 
-    Input blocks: [B * nr * nc, bs, bs] -> output: [B, m, n].
+    Args:
+        blocks: Blocked tensor of shape [B * nr * nc, block_size, block_size].
+        meta: Tuple (nr, nc, m, n) from _block2d containing grid dimensions and original shape.
+        block_size: Size of square blocks.
+
+    Returns:
+        jax.Array: Reconstructed tensor of shape [B, m, n] with padding removed.
     """
     nr, nc, m, n = meta
     bs = block_size
@@ -1177,7 +1621,19 @@ def _unblock2d(blocks, meta, block_size):
 
 
 def _block_rows(x, block_size):
-    """Block rows for each [m, n] in [B, m, n]. Returns [B * nr, bs, n] and meta (nr, m, n)."""
+    """Block matrices along the row dimension only.
+
+    Partitions each matrix into horizontal strips of height block_size.
+
+    Args:
+        x: Input tensor of shape [B, m, n].
+        block_size: Height of row blocks.
+
+    Returns:
+        tuple: (blocks, meta) where:
+            - blocks: Array of shape [B * nr, block_size, n]
+            - meta: Tuple (nr, m, n) with number of row blocks and original shape
+    """
     B, m, n = x.shape
     nr = (m + block_size - 1) // block_size
     pm = nr * block_size
@@ -1189,7 +1645,17 @@ def _block_rows(x, block_size):
 
 
 def _unblock_rows(blocks, meta, block_size, B):
-    """Inverse of _block_rows_batched. Blocks: [B * nr, bs, n] -> [B, m, n]."""
+    """Reconstruct matrices from row-blocked representation (inverse of _block_rows).
+
+    Args:
+        blocks: Row-blocked tensor of shape [B * nr, block_size, n].
+        meta: Tuple (nr, m, n) from _block_rows.
+        block_size: Height of row blocks.
+        B: Batch size.
+
+    Returns:
+        jax.Array: Reconstructed tensor of shape [B, m, n].
+    """
     nr, m, n = meta
     x3 = blocks.reshape(B, nr, block_size, n)
     x = x3.reshape(B, nr * block_size, n)
@@ -1197,7 +1663,19 @@ def _unblock_rows(blocks, meta, block_size, B):
 
 
 def _block_cols(x, block_size):
-    """Block columns for each [m, n] in [B, m, n]. Returns [B * nc, m, bs] and meta (nc, m, n)."""
+    """Block matrices along the column dimension only.
+
+    Partitions each matrix into vertical strips of width block_size.
+
+    Args:
+        x: Input tensor of shape [B, m, n].
+        block_size: Width of column blocks.
+
+    Returns:
+        tuple: (blocks, meta) where:
+            - blocks: Array of shape [B * nc, m, block_size]
+            - meta: Tuple (nc, m, n) with number of column blocks and original shape
+    """
     B, m, n = x.shape
     nc = (n + block_size - 1) // block_size
     pn = nc * block_size
@@ -1209,7 +1687,17 @@ def _block_cols(x, block_size):
 
 
 def _unblock_cols(blocks, meta, block_size, B):
-    """Inverse of _block_cols_batched. Blocks: [B * nc, m, bs] -> [B, m, n]."""
+    """Reconstruct matrices from column-blocked representation (inverse of _block_cols).
+
+    Args:
+        blocks: Column-blocked tensor of shape [B * nc, m, block_size].
+        meta: Tuple (nc, m, n) from _block_cols.
+        block_size: Width of column blocks.
+        B: Batch size.
+
+    Returns:
+        jax.Array: Reconstructed tensor of shape [B, m, n].
+    """
     nc, m, n = meta
     x4 = blocks.reshape(B, nc, m, block_size).transpose(0, 2, 1, 3)
     x = x4.reshape(B, m, nc * block_size)
@@ -1217,6 +1705,18 @@ def _unblock_cols(blocks, meta, block_size, B):
 
 
 def _merge_dims(shape):
+    """Merge a multi-dimensional shape into a 2D shape for Kronecker factorization.
+
+    Finds the optimal split point to reshape an N-dimensional tensor into a 2D matrix
+    with balanced dimensions, minimizing the aspect ratio.
+
+    Args:
+        shape: Original tensor shape as a tuple.
+
+    Returns:
+        tuple: Merged 2D shape. Returns original shape if already 1D or 2D,
+            or if the tensor is effectively 1D (all but one dim are 1).
+    """
     if len(shape) < 2:
         return shape
     if np.prod(shape) == np.max(shape):
@@ -1234,6 +1734,20 @@ def _merge_dims(shape):
 
 
 def _identity_padded(block_size, valid, dtype):
+    """Create a padded identity matrix for initializing preconditioners.
+
+    Creates an identity matrix of the specified valid size, padded with zeros
+    to reach the full block_size.
+
+    Args:
+        block_size: Target matrix size after padding.
+        valid: Number of valid rows/columns (size of identity submatrix).
+        dtype: Data type for the output matrix.
+
+    Returns:
+        jax.Array: Identity matrix of shape [block_size, block_size] with
+            identity in top-left [valid, valid] corner and zeros elsewhere.
+    """
     if valid >= block_size:
         return jnp.eye(block_size, dtype=dtype)
     eye = jnp.eye(valid, dtype=dtype)

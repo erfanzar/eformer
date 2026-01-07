@@ -12,6 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Custom gradient transformations for eFormer optimizers.
+
+This submodule provides custom optax-compatible gradient transformations
+including advanced optimizers like Mars and White Kron variants (Quad/Skew).
+
+Modules:
+    mars: Mars (Matrix-wise Adaptive Regularized Scaling) optimizer.
+    white_kron: White Kron optimizer variants with different preconditioner updates.
+    utils: Utility functions for creating schedulers and weight decay transformations.
+
+Key Components:
+    - scale_by_mars: Gradient scaling transformation for Mars optimizer.
+    - mars: Complete Mars optimizer with learning rate scaling.
+    - scale_by_quad: Gradient scaling with QUAD preconditioner update.
+    - scale_by_skew: Gradient scaling with skew preconditioner update.
+    - quad: Complete Quad optimizer with weight decay and learning rate.
+    - skew: Complete Skew optimizer with weight decay and learning rate.
+    - optax_add_scheduled_weight_decay: Weight decay with scheduled rate.
+    - create_linear_scheduler: Linear learning rate schedule builder.
+    - create_cosine_scheduler: Cosine learning rate schedule builder.
+"""
 
 from .mars import mars, scale_by_mars
 from .utils import (

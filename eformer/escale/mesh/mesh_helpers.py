@@ -21,12 +21,56 @@ from jax.sharding import Mesh, PartitionSpec
 
 
 class MeshPartitionHelper:
+    """Helper class for analyzing and applying partition strategies to PyTrees.
+
+    This class provides utilities for automatically determining optimal
+    sharding strategies based on array shapes and mesh configuration. It
+    supports various parallelism patterns including FSDP, data parallelism,
+    tensor parallelism, and sequence parallelism.
+
+    The helper analyzes array shapes and suggests appropriate sharding
+    methods based on the available mesh axes and their sizes.
+
+    Attributes:
+        mesh: The JAX mesh to use for sharding.
+        axis_sizes: Dictionary mapping axis names to their sizes.
+
+    Example:
+        >>> mesh = create_mesh(axis_dims=(2, 4, 1, 2, 1),
+        ...                    axis_names=('dp', 'fsdp', 'ep', 'tp', 'sp'))
+        >>> helper = MeshPartitionHelper(mesh)
+        >>> # Analyze and auto-shard a model
+        >>> sharded_params = helper.auto_shard_pytree(model_params)
+    """
+
     def __init__(self, mesh: Mesh):
+        """Initialize the MeshPartitionHelper.
+
+        Args:
+            mesh: The JAX mesh to use for partition analysis and sharding.
+        """
         self.mesh = mesh
         self.axis_sizes = dict(zip(self.mesh.axis_names, self.mesh.devices.shape, strict=False))
 
     def analyze_pytree(self, pytree: tp.Any) -> dict[tuple[int, ...], PartitionSpec]:
-        """Analyze pytree and suggest partitioning for each unique array shape."""
+        """Analyze a PyTree and suggest partitioning methods for each unique shape.
+
+        Collects all unique array shapes in the PyTree and determines
+        appropriate sharding methods for each based on the mesh configuration.
+
+        Args:
+            pytree: A PyTree of arrays to analyze.
+
+        Returns:
+            A dictionary mapping array shapes to lists of suggested sharding
+            method tuples. Each method tuple contains axis names to use
+            for sharding (e.g., ('fsdp', 'sp') for combined sharding).
+
+        Example:
+            >>> helper = MeshPartitionHelper(mesh)
+            >>> shape_methods = helper.analyze_pytree(params)
+            >>> # {(1024, 4096): [('fsdp', 'sp'), ('tp',)], ...}
+        """
         shapes_dict = {}
 
         def collect_shapes(x):
@@ -42,8 +86,26 @@ class MeshPartitionHelper:
         return shapes_dict
 
     def _suggest_methods(self, shape: tuple[int, ...]) -> list[tuple]:
-        """Suggest sharding methods based on array shape and mesh.
-        Now returns tuples of methods for combined sharding.
+        """Suggest sharding methods based on array shape and mesh configuration.
+
+        Analyzes the array shape and available mesh axes to determine which
+        sharding strategies could be applied. Returns tuples of axis names
+        that can be used together for multi-dimensional sharding.
+
+        The method considers:
+        - Combined FSDP+SP sharding for 2D+ arrays with sufficient size
+        - Data parallelism (dp) for batch dimensions
+        - Sequence parallelism (sp) for sequence dimensions
+        - Tensor parallelism (tp) for model dimensions
+        - FSDP for weight sharding
+
+        Args:
+            shape: The shape of the array to find sharding methods for.
+
+        Returns:
+            A list of tuples, where each tuple contains axis names that can
+            be used together for sharding. Tuples are ordered by priority,
+            with preferred methods first.
         """
         methods = []
         dims = len(shape)
@@ -76,6 +138,30 @@ class MeshPartitionHelper:
         methods: list[tuple],
         min_shard_size: int = 1024,
     ) -> PartitionSpec:
+        """Create a PartitionSpec for an array using suggested sharding methods.
+
+        Takes a list of sharding method tuples and determines how to apply
+        them to the array dimensions. Handles both single-axis and
+        multi-axis (combined) sharding methods.
+
+        Args:
+            array_shape: The shape of the array to create a spec for.
+            methods: List of sharding method tuples from _suggest_methods.
+            min_shard_size: Minimum number of elements per shard to consider
+                sharding worthwhile. Prevents over-sharding small arrays.
+                Defaults to 1024.
+
+        Returns:
+            A PartitionSpec assigning mesh axes to array dimensions.
+            Returns an empty PartitionSpec for scalar arrays or if no
+            suitable sharding is found.
+
+        Example:
+            >>> helper = MeshPartitionHelper(mesh)
+            >>> methods = helper._suggest_methods((1024, 4096))
+            >>> spec = helper.create_partition_spec((1024, 4096), methods)
+            >>> # PartitionSpec('fsdp', 'tp')
+        """
         if not array_shape:
             return PartitionSpec()
 
@@ -143,10 +229,42 @@ class MeshPartitionHelper:
         return PartitionSpec(*spec)
 
     def shard_array(self, array, partition_spec):
+        """Shard an array according to a partition specification.
+
+        Places the array on devices according to the given partition spec,
+        creating a distributed array with NamedSharding.
+
+        Args:
+            array: The array to shard.
+            partition_spec: The PartitionSpec defining how to distribute
+                the array across devices.
+
+        Returns:
+            A JAX array distributed across devices according to the
+            partition specification.
+        """
         return jax.device_put(array, jax.sharding.NamedSharding(self.mesh, partition_spec))
 
     def auto_shard_pytree(self, pytree: tp.Any, min_shard_size: int = 1024):
-        """Automatically shard entire pytree based on analysis."""
+        """Automatically shard an entire PyTree based on shape analysis.
+
+        Analyzes all arrays in the PyTree, determines optimal sharding
+        strategies, and applies them. This is a convenience method that
+        combines analyze_pytree, create_partition_spec, and shard_array.
+
+        Args:
+            pytree: A PyTree of arrays to shard.
+            min_shard_size: Minimum number of elements to consider sharding.
+                Arrays smaller than this remain unsharded. Defaults to 1024.
+
+        Returns:
+            A PyTree with the same structure where each array has been
+            sharded according to its optimal partition specification.
+
+        Example:
+            >>> helper = MeshPartitionHelper(mesh)
+            >>> sharded_params = helper.auto_shard_pytree(model_params)
+        """
         shape_specs = self.analyze_pytree(pytree)
 
         def shard_leaf(x):

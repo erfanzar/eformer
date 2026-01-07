@@ -14,44 +14,37 @@
 
 
 """
-Quantization Module
+8-bit Integer Quantization Module.
 
-This module provides functionality for quantizing and dequantizing arrays using two different quantization methods:
-- 8-bit quantization (`Array8B`)
+This module provides 8-bit integer quantization for neural network weights,
+offering approximately 4x memory reduction compared to float32 with minimal
+accuracy loss for most applications.
 
-These classes are designed to reduce memory usage and computational overhead while maintaining reasonable accuracy for
-machine learning models. They are built on top of JAX, a high-performance numerical computing library.
+The INT8 format uses per-axis scaling to maintain precision, making it suitable
+for both inference and quantization-aware training. This module includes:
 
-Classes:
-    - `Array8B`: Implements 8-bit quantization for arrays.
+- Array8B: Implicit array class for INT8 quantized weights
+- Weight-only quantization: Optimized bf16 @ int8 matmul path
+- Sharding support: Distributed computation with JAX sharding
+- JAX primitive handlers: Transparent integration with JAX operations
 
-Usage Example:
-    ```python
-    import jax
-    from eformer.ops.quantization import Array8B, ArrayNF4
-    from eformer.jaximus import implicit
+Key Features:
+    - Per-axis quantization with configurable axis
+    - Automatic sharding preservation across operations
+    - Optimized bf16 @ int8 weight-only matmul
+    - Direct transpose without materialization
 
-    array = jax.random.normal(jax.random.key(0), (256, 64), "f2")
-
-
-    qarray = Array8B(array)
-
-
-    n4array = ArrayNF4(array)
-
-
-
-    def power(x):
-      return x**2
-
-
-
-    print(jax.jit(implicit(power))(qarray))
-    print(qarray)
-
-    print(jax.jit(implicit(power))(n4array))
-    print(n4array)
-    ```
+Example:
+    >>> import jax.numpy as jnp
+    >>> from eformer.ops.quantization import Array8B
+    >>>
+    >>> # Quantize weights
+    >>> weights = jnp.ones((128, 256), dtype=jnp.float32)
+    >>> quantized = Array8B.quantize(weights, axis=(-1,))
+    >>>
+    >>> # Use transparently in matrix operations
+    >>> inputs = jnp.ones((32, 128), dtype=jnp.bfloat16)
+    >>> output = inputs @ quantized  # Uses optimized bf16 @ int8 path
 """
 
 from __future__ import annotations
@@ -63,7 +56,7 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.extend.core import Primitive
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from eformer.jaximus import ImplicitArray, aux_field, register, ste
 
@@ -178,6 +171,37 @@ class Array8B(ImplicitArray):
             sharding=sharding,
         )
 
+    def with_mesh_and_axis(
+        self,
+        mesh_and_axis: tuple[Mesh, PartitionSpec | tuple[tp.Any, ...] | None],
+    ) -> Array8B:
+        """
+        Apply sharding using a mesh and axis specification tuple.
+
+        Convenience method that creates a NamedSharding from a mesh and axis
+        specification, commonly used with model parallelism utilities.
+
+        Args:
+            mesh_and_axis: A tuple of (Mesh, axis_spec) where axis_spec can be:
+                - None: Replicated across all devices
+                - PartitionSpec: Use directly
+                - tuple/list: Convert to PartitionSpec
+                - str: Single axis name
+
+        Returns:
+            Array8B: New instance with the specified sharding applied.
+        """
+        mesh, axis = mesh_and_axis
+        if axis is None:
+            spec = PartitionSpec()
+        elif isinstance(axis, PartitionSpec):
+            spec = axis
+        elif isinstance(axis, (tuple, list)):
+            spec = PartitionSpec(*axis)
+        else:
+            spec = PartitionSpec(axis)
+        return self.with_sharding(NamedSharding(mesh, spec))
+
     def reshard(self, sharding: ShardingType) -> Array8B:
         """Alias for with_sharding for API consistency."""
         return self.with_sharding(sharding)
@@ -188,12 +212,28 @@ class Array8B(ImplicitArray):
         return self.sharding is not None
 
     def delete(self):
+        """
+        Delete the underlying weight and scale arrays to free memory.
+
+        Explicitly releases the memory held by the quantized representation.
+        Useful for manual memory management in memory-constrained environments.
+        """
         self.weight.delete()
         self.scale.delete()
 
 
 def _apply_sharding(array: Array, sharding: ShardingType) -> Array:
-    """Apply sharding constraint to an array if sharding is specified."""
+    """
+    Apply sharding constraint to an array if sharding is specified.
+
+    Args:
+        array (jax.Array): The array to apply sharding to.
+        sharding (ShardingType): NamedSharding, PartitionSpec, or None.
+
+    Returns:
+        jax.Array: The array with sharding constraint applied, or the
+            original array if sharding is None.
+    """
     if sharding is None:
         return array
 
@@ -207,6 +247,20 @@ ArrayType = Array | Array8B
 
 @register("lt")
 def lt_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType, **kwargs):
+    """
+    Custom handler for JAX's less-than comparison operation.
+
+    Materializes Array8B inputs before performing the comparison.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): First operand for comparison.
+        y (ArrayType): Second operand for comparison.
+        **kwargs: Additional keyword arguments for the lt operation.
+
+    Returns:
+        jax.Array: Boolean array with element-wise comparison results.
+    """
     if isinstance(x, Array8B):
         x = x.materialize()
     if isinstance(y, Array8B):
@@ -216,6 +270,20 @@ def lt_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType, **kwargs):
 
 @register("convert_element_type")
 def convert_element_type_8bit_operand_pos(primitive: Primitive, operand: Array8B, new_dtype: tp.Any) -> ArrayType:
+    """
+    Custom handler for JAX's convert_element_type operation (positional args).
+
+    For Array8B, updates the stored dtype without actual conversion.
+    The conversion happens lazily during materialization.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array8B): The array to convert.
+        new_dtype (Any): The target dtype.
+
+    Returns:
+        ArrayType: The array with updated dtype metadata.
+    """
     if isinstance(operand, Array8B):
         operand.dtype = new_dtype
         return operand
@@ -225,6 +293,20 @@ def convert_element_type_8bit_operand_pos(primitive: Primitive, operand: Array8B
 
 @register("convert_element_type")
 def convert_element_type_8bit_operand_kw(primitive: Primitive, operand: Array8B, **kwargs) -> ArrayType:
+    """
+    Custom handler for JAX's convert_element_type operation (keyword args).
+
+    For Array8B, updates the stored dtype without actual conversion.
+    The conversion happens lazily during materialization.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array8B): The array to convert.
+        **kwargs: Keyword arguments including 'new_dtype'.
+
+    Returns:
+        ArrayType: The array with updated dtype metadata.
+    """
     new_dtype = kwargs.get("new_dtype", jnp.bfloat16)
     if isinstance(operand, Array8B):
         operand.dtype = new_dtype
@@ -235,6 +317,19 @@ def convert_element_type_8bit_operand_kw(primitive: Primitive, operand: Array8B,
 
 @register("integer_pow")
 def integer_pow_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
+    """
+    Custom handler for JAX's integer power operation (positional args).
+
+    Materializes Array8B inputs before performing the power operation.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Base array.
+        y (ArrayType): Exponent array.
+
+    Returns:
+        ArrayType: Result of x raised to the power y.
+    """
     if isinstance(x, Array8B):
         x = x.materialize()
     if isinstance(y, Array8B):
@@ -244,6 +339,19 @@ def integer_pow_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> Arr
 
 @register("integer_pow")
 def integer_pow_8bit_x(primitive: Primitive, x: ArrayType, **kwargs) -> ArrayType:
+    """
+    Custom handler for JAX's integer power operation (keyword args).
+
+    Materializes Array8B input before performing the power operation.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Base array.
+        **kwargs: Keyword arguments including 'y' for exponent (default: 2).
+
+    Returns:
+        ArrayType: Result of x raised to the power y.
+    """
     y = kwargs.get("y", 2)
     if isinstance(x, Array8B):
         x = x.materialize()
@@ -252,6 +360,19 @@ def integer_pow_8bit_x(primitive: Primitive, x: ArrayType, **kwargs) -> ArrayTyp
 
 @register("div")
 def div_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
+    """
+    Custom handler for JAX's division operation.
+
+    Materializes Array8B inputs before performing element-wise division.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (ArrayType): Dividend array.
+        y (ArrayType): Divisor array.
+
+    Returns:
+        ArrayType: Result of element-wise division x / y.
+    """
     if isinstance(x, Array8B):
         x = x.materialize()
     if isinstance(y, Array8B):
@@ -261,6 +382,18 @@ def div_8bit_xy(primitive: Primitive, x: ArrayType, y: ArrayType) -> ArrayType:
 
 @register("sqrt")
 def sqrt_8bit_x(primitive: Primitive, x: Array8B) -> ArrayType:
+    """
+    Custom handler for JAX's square root operation.
+
+    Materializes Array8B input before computing element-wise square root.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        x (Array8B): Input array.
+
+    Returns:
+        ArrayType: Element-wise square root of the input.
+    """
     x = x.materialize()
     return lax.sqrt(x)
 
@@ -271,15 +404,32 @@ def matmul_bf16_int8_weight_only(
     rhs_scale: Array,  # typically (K, 1) or (1, N) from quantize_int8
 ) -> Array:
     """
-    bf16 lhs @ int8 rhs (weight-only quantization).
+    Optimized bfloat16 @ int8 matrix multiplication for weight-only quantization.
 
-    We infer whether rhs_scale is per-row (K,1) or per-column (1,N)
-    and place the scale in the cheapest mathematically correct spot:
+    This function performs matrix multiplication between bfloat16 activations
+    and int8 quantized weights, with intelligent scale placement for optimal
+    performance. It detects the scale shape and applies the mathematically
+    equivalent but computationally cheaper operation.
 
-      - per-column (1, N):  Y = (lhs @ W_q) * scale
-      - per-row    (K, 1):  Y = (lhs * scale^T) @ W_q
+    Args:
+        lhs_bf16 (jax.Array): Left operand in bfloat16, typically activations.
+            Shape: (..., M, K).
+        rhs_q_int8 (jax.Array): Right operand as int8 quantized weights.
+            Shape: (K, N).
+        rhs_scale (jax.Array): Scale factors for the int8 weights.
+            Typically (K, 1) for per-row or (1, N) for per-column scaling.
 
-    Anything else falls back to a generic dequantize-then-matmul path.
+    Returns:
+        jax.Array: Result in bfloat16 with shape (..., M, N).
+
+    Scale Placement Strategies:
+        - per-column (1, N): Y = (lhs @ W_q) * scale  (post-multiply)
+        - per-row (K, 1): Y = (lhs * scale^T) @ W_q  (pre-multiply)
+        - other shapes: Fall back to full dequantization before matmul
+
+    Note:
+        The computation uses float32 accumulation internally for numerical
+        stability, then casts back to bfloat16 for the output.
     """
     rhs_bf16 = rhs_q_int8.astype(jnp.bfloat16)
     w_shape = rhs_q_int8.shape
@@ -314,19 +464,25 @@ def matmul_bf16_int8_weight_only(
 @register("dot_general")
 def dot_general_8bit_lhs_rhs(primitive: Primitive, lhs: ArrayType, rhs: ArrayType, *args, **kwargs):
     """
-    Custom handler for JAX's dot_general operation.
+    Custom handler for JAX's dot_general operation with Array8B support.
 
-    Materializes Array8B inputs before performing the operation.
+    When the right operand is Array8B and left is a regular bfloat16 array,
+    uses the optimized weight-only matmul path. Otherwise, materializes
+    Array8B inputs before performing the standard operation.
 
     Args:
-
-      lhs (ArrayType): Left-hand side array.
-      rhs (ArrayType): Right-hand side array.
-      *args: Variable length argument list.
-      **kwargs: Arbitrary keyword arguments.
+        primitive (Primitive): The JAX primitive being handled.
+        lhs (ArrayType): Left-hand side array (activations).
+        rhs (ArrayType): Right-hand side array (potentially quantized weights).
+        *args: Variable length argument list including dimension_numbers.
+        **kwargs: Arbitrary keyword arguments.
 
     Returns:
-      The result of lax.dot_general operation.
+        jax.Array: The result of the dot_general operation.
+
+    Note:
+        The optimized path is triggered when: lhs is regular Array, rhs is Array8B.
+        This enables efficient inference without full weight dequantization.
     """
     if isinstance(lhs, Array) and isinstance(rhs, Array8B):
         return matmul_bf16_int8_weight_only(
@@ -594,7 +750,22 @@ def concatenate_8bit_operands(primitive: Primitive, operands: tp.Sequence[ArrayT
 
 @register("broadcast_in_dim")
 def broadcast_in_dim_8bit_operand(primitive: Primitive, operand: Array8B, *args, **params) -> ArrayType:
-    """Handle broadcast_in_dim for Array8B. Preserves sharding from the original array."""
+    """
+    Custom handler for JAX's broadcast_in_dim operation.
+
+    Broadcasts both weight and scale arrays directly without materialization,
+    preserving the quantized representation. Updates axis mapping for the
+    new shape and preserves sharding.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array8B): The array to broadcast.
+        *args: Positional arguments for the broadcast operation.
+        **params: Keyword parameters including shape and broadcast_dimensions.
+
+    Returns:
+        Array8B: The broadcasted array with updated shape, axis, and preserved sharding.
+    """
     subfuns, bind_params = primitive.get_bind_params(params)
 
     shape = bind_params["shape"]
@@ -620,7 +791,22 @@ def broadcast_in_dim_8bit_operand(primitive: Primitive, operand: Array8B, *args,
 
 @register("gather")
 def gather_8bit_operand(primitive: Primitive, operand: Array8B, *args, **kwargs) -> ArrayType:
-    """Handle gather for Array8B."""
+    """
+    Custom handler for JAX's gather operation.
+
+    Materializes Array8B input before performing index-based gathering.
+    Returns a regular array (not re-quantized) since gather typically selects
+    arbitrary elements.
+
+    Args:
+        primitive (Primitive): The JAX primitive being handled.
+        operand (Array8B): The source array to gather from.
+        *args: Positional arguments including start_indices.
+        **kwargs: Keyword arguments for the gather operation.
+
+    Returns:
+        jax.Array: The gathered values as a regular JAX array.
+    """
     array = operand.materialize()
     result = jax.lax.gather(array, *args, **kwargs)
     return result
@@ -629,7 +815,42 @@ def gather_8bit_operand(primitive: Primitive, operand: Array8B, *args, **kwargs)
 @ste
 def straight_through_8bit(weights: jax.Array, axis: int | None = None):
     """
-    Straight-through 8BIT emulator.
+    Straight-through estimator for 8-bit quantization.
+
+    Quantizes weights to int8 format in the forward pass, but passes gradients
+    straight through (unchanged) in the backward pass. This enables
+    quantization-aware training where the model learns to compensate for
+    quantization effects.
+
+    Args:
+        weights (jax.Array): Input weights to quantize. Typically float32 or
+            bfloat16 neural network parameters.
+        axis (int | None): Axis along which to compute quantization scale.
+            Defaults to None (uses -1, the last axis).
+
+    Returns:
+        jax.Array: Materialized quantized weights with the same shape as input.
+            Forward pass returns quantized values, backward pass passes
+            gradients through unchanged to enable training.
+
+    Example:
+        >>> import jax
+        >>> import jax.numpy as jnp
+        >>> from eformer.ops.quantization import straight_through_8bit
+        >>>
+        >>> # Use in a training step for QAT
+        >>> @jax.jit
+        ... def forward(params, x):
+        ...     # Apply INT8 quantization with STE
+        ...     w = straight_through_8bit(params['weight'], axis=-1)
+        ...     return x @ w
+        >>>
+        >>> # Gradients flow to original float32 params
+        >>> grad_fn = jax.grad(lambda p, x: forward(p, x).sum())
+
+    Note:
+        The @ste decorator makes this function differentiable by implementing
+        the identity gradient (grad_input = grad_output) in the backward pass.
     """
 
     return Array8B.quantize(weights, axis=axis).materialize()

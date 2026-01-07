@@ -108,7 +108,26 @@ logger = logging.getLogger("ray")
 
 
 def resolve_maybe_refs(items):
-    """If items are Ray ObjectRefs, ray.get() them; otherwise return as-is."""
+    """Resolve Ray ObjectRefs to their values if present.
+
+    Checks if all items in the provided list are Ray ObjectRefs and
+    resolves them using ray.get(). If the items are not ObjectRefs
+    or the list is empty, returns them unchanged.
+
+    Args:
+        items: List of items that may be Ray ObjectRefs or regular values.
+
+    Returns:
+        List of resolved values if input contained ObjectRefs,
+        otherwise the original items unchanged.
+
+    Example:
+        >>> refs = [task.remote() for task in tasks]
+        >>> results = resolve_maybe_refs(refs)
+        >>>
+        >>> values = [1, 2, 3]
+        >>> results = resolve_maybe_refs(values)
+    """
     if not items:
         return items
     import ray

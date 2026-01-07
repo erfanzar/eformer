@@ -12,6 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Executor module for distributed computing with Ray and SLURM.
+
+This module provides utilities for managing distributed execution of workloads
+across various compute environments, including:
+
+- Ray-based distributed execution with support for TPUs, GPUs, and CPUs
+- SLURM cluster integration for HPC environments
+- Automatic cluster discovery and initialization
+- Resource management and allocation
+
+Key Components:
+    - **DistributedConfig**: Configuration for distributed JAX execution
+    - **RayClusterConfig**: Configuration for Ray cluster initialization
+    - **auto_ray_cluster**: Automatic Ray cluster setup and discovery
+    - **eSlurmCluster**: Extended SLURM cluster implementation
+    - **ray**: Submodule containing Ray-specific executor utilities
+
+Example:
+    Basic distributed setup:
+
+    >>> from eformer.executor import DistributedConfig, auto_ray_cluster
+    >>>
+    >>> # Initialize distributed JAX
+    >>> config = DistributedConfig()
+    >>> config.initialize()
+    >>>
+    >>> # Set up Ray cluster
+    >>> auto_ray_cluster()
+"""
 
 from . import ray
 from .cluster_util import DistributedConfig, RayClusterConfig, auto_ray_cluster, eSlurmCluster

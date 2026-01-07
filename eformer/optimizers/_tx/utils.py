@@ -23,8 +23,14 @@ from jax import numpy as jnp
 
 
 class OptaxScheduledWeightDecayState(tp.NamedTuple):
-    """
-    State for the scheduled weight decay optimizer.
+    """State for the scheduled weight decay optimizer.
+
+    This named tuple holds the state required by the scheduled weight decay
+    transformation, tracking the current step count for schedule evaluation.
+
+    Attributes:
+        count (chex.Array): Integer array tracking the current optimization step.
+            Used to evaluate the weight decay schedule function.
     """
 
     count: chex.Array
@@ -52,8 +58,13 @@ def optax_add_scheduled_weight_decay(
     """
 
     def init_fn(params: chex.ArrayTree) -> OptaxScheduledWeightDecayState:
-        """
-        Initializes the state of the optimizer.
+        """Initialize the state of the scheduled weight decay optimizer.
+
+        Args:
+            params (chex.ArrayTree): Parameter tree (unused, but required by optax interface).
+
+        Returns:
+            OptaxScheduledWeightDecayState: Initial state with step count set to zero.
         """
         del params
         return OptaxScheduledWeightDecayState(count=jnp.zeros([], jnp.int32))
@@ -63,8 +74,23 @@ def optax_add_scheduled_weight_decay(
         state: OptaxScheduledWeightDecayState,
         params: chex.ArrayTree | None = None,
     ) -> tuple[chex.ArrayTree, OptaxScheduledWeightDecayState]:
-        """
-        Applies weight decay to the updates based on the schedule.
+        """Apply scheduled weight decay to the gradient updates.
+
+        Computes the weight decay rate from the schedule function and adds
+        the scaled parameters to the gradient updates.
+
+        Args:
+            updates (chex.ArrayTree): Gradient updates to be modified.
+            state (OptaxScheduledWeightDecayState): Current optimizer state containing step count.
+            params (chex.ArrayTree | None): Model parameters for weight decay computation.
+
+        Returns:
+            tuple[chex.ArrayTree, OptaxScheduledWeightDecayState]: Tuple containing:
+                - Modified gradient updates with weight decay applied.
+                - Updated state with incremented step count.
+
+        Raises:
+            ValueError: If params is None, as weight decay requires parameter values.
         """
         if params is None:
             raise ValueError("Params cannot be None for weight decay!")

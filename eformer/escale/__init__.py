@@ -12,6 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""eScale: JAX sharding and mesh management utilities for distributed computation.
+
+This module provides comprehensive utilities for managing JAX device meshes and
+sharding strategies for distributed machine learning workloads. It supports
+various parallelism paradigms including data parallelism, tensor parallelism,
+fully-sharded data parallelism (FSDP), sequence parallelism, and expert parallelism.
+
+Key Components:
+    - **Mesh Creation**: Functions to create and manage JAX device meshes
+      (`create_mesh`, `create_cpu_mesh`, `parse_mesh_from_string`)
+    - **Sharding Rules**: Classes for defining automatic sharding strategies
+      (`AutoShardingRule`, `ShapeBasedShardingRule`, `MemoryConstrainedShardingRule`)
+    - **Partition Management**: Tools for defining and applying partition specifications
+      (`PartitionAxis`, `PartitionManager`, `auto_partition_spec`)
+    - **Constraint Application**: Functions for applying sharding constraints to arrays
+      (`with_sharding_constraint`, `apply_logical_sharding`)
+    - **Analysis Tools**: Utilities for analyzing and validating sharding strategies
+      (`ShardingAnalyzer`, `analyze_sharding_strategy`)
+
+Typical Usage:
+    >>> from eformer.escale import create_mesh, PartitionAxis, PartitionManager
+    >>> # Create a mesh with data and model parallelism
+    >>> mesh = create_mesh(axis_dims=(2, 4), axis_names=('dp', 'tp'))
+    >>> # Define partition configuration
+    >>> paxis = PartitionAxis(data_parallel_axis='dp', tensor_parallel_axis='tp')
+    >>> # Use within a mesh context
+    >>> with mesh:
+    ...     # Apply sharding to arrays
+    ...     pass
+
+See Also:
+    - `eformer.escale.mesh`: Low-level mesh creation utilities
+    - `eformer.escale.partition`: Partition specification and management
+    - `eformer.escale.helpers`: Sharding rule implementations
+"""
+
 from jax.sharding import NamedSharding, PartitionSpec
 
 from .helpers import (

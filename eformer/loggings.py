@@ -74,7 +74,35 @@ _logged_once: set[tuple[str, ...]] = set()
 
 
 class ColorFormatter(logging.Formatter):
+    """Custom logging formatter that adds color to log output.
+
+    Formats log messages with ANSI color codes based on log level and adds
+    timestamps. Each log level has a distinct color for easy identification.
+
+    Color mapping:
+        - DEBUG: Orange
+        - INFO: Blue-Purple
+        - WARNING: Yellow
+        - ERROR: Red
+        - CRITICAL/FATAL: Bold Red
+
+    Example output:
+        (12:34:56 mylogger) This is an info message
+
+    Note:
+        Colors are applied via ANSI escape codes and may not display correctly
+        in non-terminal environments or terminals without color support.
+    """
+
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record with colors and timestamp.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            Formatted log string with ANSI color codes.
+        """
         orig_levelname = record.levelname
         color = LEVEL_COLORS.get(record.levelname, COLORS["RESET"])
         record.levelname = f"{color}{record.levelname:<8}{COLORS['RESET']}"
@@ -90,7 +118,39 @@ class ColorFormatter(logging.Formatter):
 
 
 class LazyLogger:
+    """A lazy-initialized logger with colored output and once-only logging support.
+
+    This logger delays initialization until first use, which is useful for:
+    - Avoiding JAX initialization issues in distributed settings
+    - Reducing overhead when logging is not needed
+    - Automatically setting appropriate log levels based on process rank
+
+    The logger supports standard log methods (debug, info, warning, error) plus
+    "_once" variants that only log a message once per unique message content.
+
+    Attributes:
+        name: Logger name for identification in output.
+        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+
+    Example:
+        >>> logger = LazyLogger("my_module")
+        >>> logger.info("Starting process...")
+        >>> logger.warn_once("This warning only appears once")
+        >>> logger.warn_once("This warning only appears once")  # No output
+
+    Note:
+        On non-primary JAX processes (process_index > 0), the log level is
+        automatically set to WARNING to reduce noise in distributed training.
+    """
+
     def __init__(self, name: str, level: int | None = None):
+        """Initialize the lazy logger.
+
+        Args:
+            name: Name of the logger, displayed in log output.
+            level: Logging level. If None, uses LOGGING_LEVEL_ED environment
+                   variable or defaults to INFO.
+        """
         if level is None:
             level = _LOGGING_LEVELS[os.getenv("LOGGING_LEVEL_ED", "INFO")]
         if isinstance(level, str):
@@ -110,6 +170,17 @@ class LazyLogger:
         return self._name
 
     def _ensure_initialized(self) -> None:
+        """Initialize the underlying logger if not already done.
+
+        This method is called automatically before any logging operation.
+        It configures the logger with:
+        - Colored console output via ColorFormatter
+        - Appropriate log level based on JAX process index
+        - Non-propagating behavior to avoid duplicate messages
+
+        In distributed JAX settings, non-primary processes (process_index > 0)
+        automatically have their log level set to WARNING.
+        """
         if self._logger is not None:
             return
 
@@ -136,7 +207,16 @@ class LazyLogger:
 
     @staticmethod
     def _make_hashable(value: tp.Any) -> tp.Any:
-        """Best-effort conversion to a hashable key for log-once deduping."""
+        """Convert a value to a hashable key for log-once deduplication.
+
+        Args:
+            value: Any value to make hashable.
+
+        Returns:
+            A hashable representation of the value. If already hashable,
+            returns as-is. Otherwise, returns a tuple of (type, repr) or
+            (type, id) as fallback.
+        """
         try:
             hash(value)
         except Exception:
@@ -147,7 +227,17 @@ class LazyLogger:
         return value
 
     def _log_once(self, level: int, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
-        """Log a message only once per unique message."""
+        """Log a message only once per unique message.
+
+        Uses a global cache to track which messages have been logged.
+        Thread-safe via internal lock.
+
+        Args:
+            level: Logging level (e.g., logging.INFO, logging.WARNING).
+            message: Log message format string.
+            *args: Arguments for message formatting.
+            **kwargs: Additional keyword arguments passed to the logger.
+        """
         # Create a hashable key from the level, message, and args
         safe_args = tuple(self._make_hashable(arg) for arg in args)
         message_key = (logging.getLevelName(level), message, *safe_args)
@@ -180,9 +270,28 @@ class LazyLogger:
     def clear_once_cache(self) -> None:
         """Clear the cache of messages logged with *_once methods."""
         with self._logged_once_lock:
-            self._logged_once.clear()
+            _logged_once.clear()
 
     def __getattr__(self, name: str) -> tp.Callable:
+        """Dynamically provide logging methods.
+
+        Allows access to standard logging methods (debug, info, warning, error,
+        critical, exception, log) without explicitly defining each one.
+
+        Args:
+            name: Method name to access (e.g., 'info', 'debug', 'error').
+
+        Returns:
+            Wrapped logging method that ensures initialization before logging.
+
+        Raises:
+            AttributeError: If the method name is not a valid logging method.
+
+        Example:
+            >>> logger = LazyLogger("test")
+            >>> logger.info("This works via __getattr__")
+            >>> logger.error("This too")
+        """
         if name in ("exception", "log"):
             method_name = name
 

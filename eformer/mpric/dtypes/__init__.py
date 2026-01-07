@@ -12,6 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Data type utilities submodule for precision management.
+
+This submodule provides utilities for working with JAX numpy dtypes,
+including mappings between string identifiers and dtype objects, and
+functions for converting arrays between different precisions.
+
+Exports:
+    DTYPE_MAPPING: Maps common dtype strings to jnp.dtype objects.
+    STRING_TO_DTYPE_MAP: Extended mapping from strings to dtypes.
+    DTYPE_TO_STRING_MAP: Reverse mapping from dtypes to strings.
+    put_dtype: Function to convert arrays to specified dtypes.
+"""
 
 from .precision_types import DTYPE_MAPPING, DTYPE_TO_STRING_MAP, STRING_TO_DTYPE_MAP, put_dtype
 
