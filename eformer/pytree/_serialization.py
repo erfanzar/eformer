@@ -126,7 +126,8 @@ def to_state_dict(target) -> dict[str, Any]:
     state_dict = ty_to_state_dict(target)
     if isinstance(state_dict, dict):
         for key in state_dict.keys():
-            assert isinstance(key, str), "A state dict must only have string keys."
+            if not isinstance(key, str):
+                raise TypeError("A state dict must only have string keys.")
     return state_dict
 
 
@@ -377,7 +378,8 @@ def _chunk(arr) -> dict[str, Any]:
 
 def _unchunk(data: dict[str, Any]):
     """Convert canonical dictionary of chunked arrays back into array."""
-    assert "__msgpack_chunked_array__" in data
+    if "__msgpack_chunked_array__" not in data:
+        raise ValueError("Expected chunked array marker '__msgpack_chunked_array__'.")
     shape = _dict_to_tuple(data["shape"])
     flatarr = np.concatenate(_dict_to_tuple(data["chunks"]))
     return flatarr.reshape(shape)

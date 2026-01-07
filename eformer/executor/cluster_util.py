@@ -325,11 +325,10 @@ def _is_local_leader():
         with lock.acquire(timeout=0.1):
             if not os.path.exists(action_performed_file):
                 _touch(action_performed_file)
+                atexit.register(_remove_if_possible, lock.lock_file)
+                atexit.register(_remove_if_possible, action_performed_file)
                 return True
-            else:
-                return False
-            atexit.register(_remove_if_possible, lock.lock_file)
-            atexit.register(_remove_if_possible, action_performed_file)
+            return False
     except filelock.Timeout:
         return False
 

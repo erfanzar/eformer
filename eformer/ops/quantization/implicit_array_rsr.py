@@ -90,7 +90,8 @@ class RSROperatorBinary(ImplicitArray):
 
     @classmethod
     def from_matrix(cls, A: Array, k: int = 8, org_dtype: jnp.dtype = jnp.float32):
-        assert A.dtype == jnp.int32 or A.dtype == jnp.int8, "Input matrix must be integer type."
+        if A.dtype not in (jnp.int32, jnp.int8):
+            raise TypeError("Input matrix must be integer type.")
 
         one_hot_maps, padding = _preprocess_matrix_jax(A.astype(jnp.int32), k)
 
@@ -98,7 +99,8 @@ class RSROperatorBinary(ImplicitArray):
 
     def dot(self, v: Array) -> Array:
         n, m = self.shape
-        assert v.shape == (n,), f"Input vector shape mismatch. Expected ({n},), got {v.shape}"
+        if v.shape != (n,):
+            raise ValueError(f"Input vector shape mismatch. Expected ({n},), got {v.shape}")
 
         return _rsr_v_dot_a_binary(v.astype(self.one_hot_maps.dtype), self.one_hot_maps, self.padding, self.k, m)
 
@@ -127,7 +129,8 @@ class RSROperatorTernary(ImplicitArray):
 
     @classmethod
     def from_matrix(cls, A: Array, k: int = 8):
-        assert A.dtype == jnp.int32 or A.dtype == jnp.int8, "Input matrix must be integer type."
+        if A.dtype not in (jnp.int32, jnp.int8):
+            raise TypeError("Input matrix must be integer type.")
 
         B1 = (A == 1).astype(jnp.int32)
         B2 = (A == -1).astype(jnp.int32)

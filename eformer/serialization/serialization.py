@@ -183,7 +183,8 @@ def tree_serialize_leaves(
         manager_was_none = False
 
     leaf_path = leaf_key_paths(pytree, prefix=prefix, is_leaf=_is_none)
-    assert len(jax.tree.leaves(leaf_path, is_leaf=_is_none)) == len(jax.tree.leaves(pytree, is_leaf=_is_none))
+    if len(jax.tree.leaves(leaf_path, is_leaf=_is_none)) != len(jax.tree.leaves(pytree, is_leaf=_is_none)):
+        raise ValueError("Leaf path count does not match pytree leaf count.")
 
     paths = _fs_paths_from_key_paths(checkpoint_dir, leaf_path)
 

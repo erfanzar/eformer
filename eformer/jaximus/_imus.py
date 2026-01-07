@@ -1054,7 +1054,8 @@ def _custom_jvp_jvp_wrap(tag, in_treedef, *in_primals_and_tangents):
             out_tangent_values = out_values[len(out_values) // 2 :]
             out_primal_values2 = []
             out_tangent_values2 = []
-            assert len(out_primal_values) == len(out_tangent_values)
+            if len(out_primal_values) != len(out_tangent_values):
+                raise ValueError("Primals and tangents length mismatch.")
             for primal, tangent in zip(out_primal_values, out_tangent_values):  # noqa
                 if primal.__class__ != tangent.__class__:
                     primal = primal.materialize()

@@ -97,7 +97,8 @@ def make_shard_and_gather_fns(
             def shard_fn(tensor: jnp.ndarray) -> jnp.ndarray:
                 with mesh:
                     tensor = jax.block_until_ready(_self_shard(tensor))
-                    assert tensor.sharding == sharding, "sharding Failed!."
+                    if tensor.sharding != sharding:
+                        raise ValueError("Sharding failed.")
                 return tensor
 
             return shard_fn
@@ -807,7 +808,7 @@ def extract_shardings(tree, mesh: Mesh = None):
       attempts to convert it into a `NamedSharding` using the provided `mesh`.
       If no `mesh` is provided, it tries to get one from the JAX context
       (e.g., using `get_incontext_mesh`). If no mesh is available in either
-      case, an AssertionError is raised.
+      case, a ValueError is raised.
     - If a leaf does not have a `.sharding` attribute, or if its sharding
       is not a `NamedSharding` or convertible `PartitionSpec`, `None` is
       returned for that leaf in the output tree.
@@ -826,8 +827,8 @@ def extract_shardings(tree, mesh: Mesh = None):
         information was found or could be constructed.
 
     Raises:
-        AssertionError: If a leaf has a `PartitionSpec` sharding but no `mesh`
-                        is provided or found in the context.
+        ValueError: If a leaf has a `PartitionSpec` sharding but no `mesh`
+                    is provided or found in the context.
     """
     if mesh is None:
         mesh = get_incontext_mesh()
@@ -835,7 +836,8 @@ def extract_shardings(tree, mesh: Mesh = None):
     def cond(x):
         sharding = x.sharding if hasattr(x, "sharding") else None
         if isinstance(sharding, jax.sharding.PartitionSpec):
-            assert mesh is not None, "Mesh Can not be none (use function under with `mesh`)."
+            if mesh is None:
+                raise ValueError("Mesh can not be None (use function under with `mesh`).")
             sharding = jax.sharding.NamedSharding(mesh=mesh, spec=sharding)
         if not isinstance(sharding, jax.sharding.NamedSharding):
             return None

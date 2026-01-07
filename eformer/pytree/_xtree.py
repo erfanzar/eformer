@@ -164,7 +164,8 @@ def xto_state_dict(target: tp.Any) -> dict[str, tp.Any]:
     state_dict = ty_to_state_dict(target)
     if isinstance(state_dict, dict):
         for key in state_dict.keys():
-            assert isinstance(key, str), "A state dict must only have string keys."
+            if not isinstance(key, str):
+                raise TypeError("A state dict must only have string keys.")
     return state_dict
 
 

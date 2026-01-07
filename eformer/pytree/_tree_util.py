@@ -81,7 +81,8 @@ def _array_equal(x, y, npi, rtol, atol):
     Returns:
         bool: True if arrays are equal within tolerance.
     """
-    assert x.dtype == y.dtype
+    if x.dtype != y.dtype:
+        return False
     if (
         isinstance(rtol, int | float) and isinstance(atol, int | float) and rtol == 0 and atol == 0
     ) or not npi.issubdtype(x.dtype, npi.inexact):
@@ -259,7 +260,8 @@ def tree_equal(
         flat_, treedef_ = tu.tree_flatten(pytree)
         if treedef_ != treedef:
             return False
-        assert len(flat) == len(flat_)
+        if len(flat) != len(flat_):
+            return False
         for elem, elem_ in zip(flat, flat_):  # noqa
             if typematch:
                 if type(elem) != type(elem_):  # noqa
@@ -595,7 +597,8 @@ def flatten_mapping(
     Returns:
       The flattened mapping.
     """
-    assert isinstance(xs, Mapping), f"expected Mapping; got {type(xs).__qualname__}"
+    if not isinstance(xs, Mapping):
+        raise TypeError(f"expected Mapping; got {type(xs).__qualname__}")
 
     def _key(path: tuple[Any, ...]) -> tuple[Any, ...] | str:
         if sep is None:
@@ -651,7 +654,8 @@ def flatten_to_sequence(
     Returns:
       The flattened mapping.
     """
-    assert isinstance(xs, Mapping), f"expected Mapping; got {type(xs).__qualname__}"
+    if not isinstance(xs, Mapping):
+        raise TypeError(f"expected Mapping; got {type(xs).__qualname__}")
     result = []
 
     def _flatten(xs: Any, prefix: tuple[Any, ...]):
@@ -841,7 +845,8 @@ def _dict_flatten_dict(xs, keep_empty_nodes=False, is_leaf=None, sep=None, fumap
         dict: Flattened dictionary with tuple or string keys.
     """
     if not fumap:
-        assert isinstance(xs, dict), f"expected dict; got {type(xs)}"
+        if not isinstance(xs, dict):
+            raise TypeError(f"expected dict; got {type(xs)}")
 
     def _key(path):
         if sep is None:
@@ -894,7 +899,8 @@ def _dict_unflatten_dict(xs, sep=None):
     Returns:
         dict: Nested dictionary structure.
     """
-    assert isinstance(xs, dict), f"input is not a dict; it is a {type(xs)}"
+    if not isinstance(xs, dict):
+        raise TypeError(f"input is not a dict; it is a {type(xs)}")
     result = {}
     for path, value in xs.items():
         if sep is not None:
@@ -1939,7 +1945,8 @@ def tree_flatten_one_level_with_keys(pytree: PyTree) -> tuple[list[tuple[KeyEntr
         if not path:
             return [(None, value)], out_treedef
 
-        assert len(path) == 1, "Only one level of flattening is supported"
+        if len(path) != 1:
+            raise ValueError("Only one level of flattening is supported")
         out.append((path[0], value))
 
     return out, out_treedef

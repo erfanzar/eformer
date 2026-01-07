@@ -85,7 +85,7 @@ def calculate_host_mesh_shape(
         Tuple representing the mesh shape for this host.
 
     Raises:
-        AssertionError: If mesh size doesn't match available devices or if
+        ValueError: If mesh size doesn't match available devices or if
             the calculated host mesh doesn't use the correct number of devices.
 
     Example:
@@ -96,10 +96,11 @@ def calculate_host_mesh_shape(
     total_devices = total_devices or jax.local_device_count()
     num_processes = num_processes or jax.process_count()
     total_mesh_size = int(np.prod(global_mesh_shape))
-    assert total_mesh_size == total_devices * num_processes, (
-        f"Mesh size {total_mesh_size} doesn't match available devices "
-        f"{total_devices * num_processes} (local x processes)"
-    )
+    if total_mesh_size != total_devices * num_processes:
+        raise ValueError(
+            f"Mesh size {total_mesh_size} doesn't match available devices "
+            f"{total_devices * num_processes} (local x processes)"
+        )
     host_mesh = list(global_mesh_shape)
     remaining_process_split = num_processes
     idx = 0
@@ -116,10 +117,11 @@ def calculate_host_mesh_shape(
             remaining_process_split = remaining_process_split // factor
         idx += 1
     host_total = int(np.prod(host_mesh))
-    assert host_total == total_devices, (
-        f"Host mesh shape {tuple(host_mesh)} uses {host_total} devices instead of {total_devices}. "
-        "Ensure that num_processes factors the global mesh shape."
-    )
+    if host_total != total_devices:
+        raise ValueError(
+            f"Host mesh shape {tuple(host_mesh)} uses {host_total} devices instead of {total_devices}. "
+            "Ensure that num_processes factors the global mesh shape."
+        )
 
     return tuple(host_mesh)
 
@@ -399,7 +401,7 @@ def parse_mesh_from_string(
         JAX Mesh configured according to the string specification.
 
     Raises:
-        AssertionError: If axis names don't match, dimensions and names have
+        ValueError: If axis names don't match, dimensions and names have
             different lengths, or unknown axis names are used.
 
     Example:
@@ -414,14 +416,17 @@ def parse_mesh_from_string(
         dim_names = []
         for axis in axis_dims.split(","):
             name, dim = axis.split(":")
-            assert name in names, f"Axis name '{name}' not found in provided names: {names}"
+            if name not in names:
+                raise ValueError(f"Axis name '{name}' not found in provided names: {names}")
             dims.append(int(dim))
             dim_names.append(name)
-        assert set(dim_names) == set(names), "Not all axis names were used in 'axis_dims'"
+        if set(dim_names) != set(names):
+            raise ValueError("Not all axis names were used in 'axis_dims'")
     else:
         dims = [int(x) for x in axis_dims.split(",")]
         dim_names = list(names)
-    assert len(dims) == len(names), "Number of dimensions and names must match"
+    if len(dims) != len(names):
+        raise ValueError("Number of dimensions and names must match")
 
     return create_mesh(tuple(dims), tuple(dim_names))
 

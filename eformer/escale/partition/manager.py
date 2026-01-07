@@ -165,7 +165,7 @@ class PartitionAxis(xTree):
         EXPERT: "expert_axis",
         EXPERT_GATE: "expert_gate_axis",
         HEAD_DIM: "attention_dim_axis",
-        KV_HEAD_DIM: "decode_attention_kv_dim_axis",
+        KV_HEAD_DIM: "attention_kv_dim_axis",
         BIAS_HEAD_SEQ: "bias_head_sequence_axis",
         BIAS_KV_SEQ: "bias_key_sequence_axis",
         EMPTY: None,
@@ -426,7 +426,7 @@ class PartitionManager(PyTree):
 
         Raises:
             LookupError: If called outside of an active `PartitionManager` context.
-            AssertionError: If neither `axes`/`mode` nor `dynamic_axes` are provided.
+            ValueError: If neither `axes`/`mode` nor `dynamic_axes` are provided.
             ValueError: Propagated from `PartitionAxis.resolve_spec` or if resolved
                 axis rule is NOT_GIVEN.
         """
@@ -455,11 +455,13 @@ class PartitionManager(PyTree):
             axes = NOT_GIVEN
 
         if axes is NOT_GIVEN or mode is NOT_GIVEN:
-            assert dynamic_axes is not NOT_GIVEN, "if axes or mode is empty you should provide dynamic axes"
+            if dynamic_axes is NOT_GIVEN:
+                raise ValueError("if axes or mode is empty you should provide dynamic axes")
             axes = dynamic_axes.axes
             mode = dynamic_axes.mode
         if isinstance(mode, int):
-            assert shape is not NOT_GIVEN, "when using dynamic mode detection shape should be provided"
+            if shape is NOT_GIVEN:
+                raise ValueError("when using dynamic mode detection shape should be provided")
             mode = MODE_DECODE if shape[mode] == 1 else MODE_TRAIN
         return self.paxis.resolve_spec(axes, mode)
 
@@ -506,7 +508,7 @@ def apply_logical_sharding(
         The JAX array with sharding constraints applied.
 
     Raises:
-        AssertionError: If neither `axes`/`mode` nor `dynamic_axes` are provided
+        ValueError: If neither `axes`/`mode` nor `dynamic_axes` are provided
                         when a manager is found or provided.
     """
 

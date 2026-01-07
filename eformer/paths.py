@@ -263,20 +263,14 @@ class LocalPath(UniversalPath):
         return self.path.read_text(encoding=encoding)
 
     def write_text(self, data: str, encoding: str = "utf-8") -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            ...
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(data, encoding=encoding)
 
     def read_bytes(self) -> bytes:
         return self.path.read_bytes()
 
     def write_bytes(self, data: bytes) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            ...
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_bytes(data)
 
     def mkdir(self, parents: bool = True, exist_ok: bool = True) -> None:

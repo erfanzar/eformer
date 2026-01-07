@@ -169,7 +169,7 @@ class RayExecutor:
             ray.JobStatus: actual result.
 
         Raises:
-            AssertionError: If pod_count in accelerator_config is not 1,
+            ValueError: If pod_count in accelerator_config is not 1,
                 indicating that execute_multislice should be used instead.
 
         Example:
@@ -180,9 +180,8 @@ class RayExecutor:
             >>> config = GpuAcceleratorConfig(count=1, type="v100")
             >>> result = RayExecutor.execute(compute, config, x=10)
         """
-        assert getattr(accelerator_config, "pod_count", 1) == 1, (
-            "Multi-slice workloads on TPUs should use 'execute_multislice'."
-        )
+        if getattr(accelerator_config, "pod_count", 1) != 1:
+            raise ValueError("Multi-slice workloads on TPUs should use 'execute_multislice'.")
 
         def do_run(
             remote_fn,
@@ -396,7 +395,7 @@ class RayExecutor:
                     for lst in per_slice_futures:
                         RayResources.cancel_all_futures(lst)
                 except Exception:
-                    pass
+                    logger.debug("Failed to cancel per-slice futures after Ray error.", exc_info=True)
 
             s = str(e).lower()
             if ("preempt" in s) or ("unhealthy or preempted" in s) or ("owner died" in s) or ("owner has exited" in s):
@@ -409,14 +408,14 @@ class RayExecutor:
                     for lst in per_slice_futures:
                         RayResources.cancel_all_futures(lst)
                 except Exception:
-                    pass
+                    logger.debug("Failed to cancel per-slice futures after failure.", exc_info=True)
             info2 = JobInfo(accelerator_config.runtime_name, "running", accelerator_config.resource_name)
             return JobFailed(info2, e)
         finally:
             try:
                 pool_manager.drain_actor_pool()
             except Exception:
-                pass
+                logger.debug("Failed to drain actor pool.", exc_info=True)
 
     @classmethod
     def execute_resumable(

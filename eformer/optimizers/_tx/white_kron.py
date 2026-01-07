@@ -84,8 +84,10 @@ def _def_scale(
     noise_scale: float = 1e-9,
 ) -> base.GradientTransformation:
     dtype = canonicalize_dtype(dtype)
-    assert dtype in (jnp.bfloat16, jnp.float32), "dtype must be bfloat16 or float32"
-    assert preconditioner_update_style in ("QUAD", "skew"), "preconditioner_update_style must be QUAD or skew"
+    if dtype not in (jnp.bfloat16, jnp.float32):
+        raise ValueError("dtype must be bfloat16 or float32")
+    if preconditioner_update_style not in ("QUAD", "skew"):
+        raise ValueError("preconditioner_update_style must be QUAD or skew")
 
     def init_fn(params):
         params_unboxed = jax.tree.map(lambda x: x, params, is_leaf=lambda x: False)

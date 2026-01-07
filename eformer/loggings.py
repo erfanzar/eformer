@@ -134,10 +134,23 @@ class LazyLogger:
 
         self._logger = logger
 
+    @staticmethod
+    def _make_hashable(value: tp.Any) -> tp.Any:
+        """Best-effort conversion to a hashable key for log-once deduping."""
+        try:
+            hash(value)
+        except Exception:
+            try:
+                return (type(value), repr(value))
+            except Exception:
+                return (type(value), id(value))
+        return value
+
     def _log_once(self, level: int, message: str, *args: tp.Any, **kwargs: tp.Any) -> None:
         """Log a message only once per unique message."""
         # Create a hashable key from the level, message, and args
-        message_key = (logging.getLevelName(level), message, *args)
+        safe_args = tuple(self._make_hashable(arg) for arg in args)
+        message_key = (logging.getLevelName(level), message, *safe_args)
         with self._logged_once_lock:
             if message_key not in _logged_once:
                 _logged_once.add(message_key)
@@ -170,14 +183,35 @@ class LazyLogger:
             self._logged_once.clear()
 
     def __getattr__(self, name: str) -> tp.Callable:
-        if name in _LOGGING_LEVELS or name.upper() in _LOGGING_LEVELS or name in ("exception", "log"):
+        if name in ("exception", "log"):
+            method_name = name
 
-            @wraps(getattr(logging.Logger, name))
+            @wraps(getattr(logging.Logger, method_name))
             def wrapped_log_method(*args: tp.Any, **kwargs: tp.Any) -> tp.Any:
                 self._ensure_initialized()
-                return getattr(self._logger, name)(*args, **kwargs)
+                return getattr(self._logger, method_name)(*args, **kwargs)
 
             return wrapped_log_method
+
+        if name in _LOGGING_LEVELS or name.upper() in _LOGGING_LEVELS:
+            level = _LOGGING_LEVELS.get(name, _LOGGING_LEVELS.get(name.upper()))
+            method_name = name.lower()
+            if hasattr(logging.Logger, method_name):
+
+                @wraps(getattr(logging.Logger, method_name))
+                def wrapped_log_method(*args: tp.Any, **kwargs: tp.Any) -> tp.Any:
+                    self._ensure_initialized()
+                    return getattr(self._logger, method_name)(*args, **kwargs)
+
+                return wrapped_log_method
+
+            @wraps(logging.Logger.log)
+            def wrapped_log_method(*args: tp.Any, **kwargs: tp.Any) -> tp.Any:
+                self._ensure_initialized()
+                return self._logger.log(level, *args, **kwargs)
+
+            return wrapped_log_method
+
         raise AttributeError(f"'LazyLogger' object has no attribute '{name}'")
 
 

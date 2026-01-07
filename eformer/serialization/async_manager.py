@@ -219,7 +219,8 @@ class AsyncCheckpointManager:
         use_tensorstore: bool = True,
     ):
         if jax.process_count() > 1:
-            assert is_initialized(), "you should call jax distribution init before running process."
+            if not is_initialized():
+                raise RuntimeError("you should call jax distribution init before running process.")
 
         self.float_dtype = float_dtype
         self.enable = enable
@@ -962,10 +963,11 @@ class AsyncCheckpointManager:
 
         leaf_keys_tree = leaf_key_paths(pytree, prefix=prefix, is_leaf=_is_none)
         leaf_keys_full: list[str] = jax.tree_util.tree_leaves(leaf_keys_tree, is_leaf=_is_none)
-        assert len(leaf_keys_full) == len(leaves), (
-            f"Mismatch between leaf_keys ({len(leaf_keys_full)}) and leaves ({len(leaves)}). "
-            "Ensure treedef and leaves use the same is_leaf and no leaves are dropped."
-        )
+        if len(leaf_keys_full) != len(leaves):
+            raise ValueError(
+                f"Mismatch between leaf_keys ({len(leaf_keys_full)}) and leaves ({len(leaves)}). "
+                "Ensure treedef and leaves use the same is_leaf and no leaves are dropped."
+            )
 
         arr_mask = [_is_array_like(x) for x in leaves]
         array_keys = [k for k, m in zip(leaf_keys_full, arr_mask, strict=False) if m]

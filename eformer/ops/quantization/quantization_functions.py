@@ -530,9 +530,13 @@ def nf4_matmul(inputs, *tensors, kernel, backward=False, blocks=None):
             tensors = [jnp.pad(t, ((0, 0), (0, 0), (0, k_pad))) for t in tensors]
 
     if not weight_transpose:
-        assert inputs.shape[1] == tensors[0].shape[0] * quant_group_size
+        expected = tensors[0].shape[0] * quant_group_size
+        if inputs.shape[1] != expected:
+            raise ValueError(f"Input shape mismatch: got {inputs.shape[1]}, expected {expected}.")
     else:
-        assert inputs.shape[1] == tensors[0].shape[2]
+        expected = tensors[0].shape[2]
+        if inputs.shape[1] != expected:
+            raise ValueError(f"Input shape mismatch: got {inputs.shape[1]}, expected {expected}.")
 
     def kernel_call(inputs, *tensors):
         inputs_dtype = inputs.dtype
