@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "eformer"
-version = "0.0.90"
+version = "0.0.95"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 description = "(EasyDel Former) is a utility library designed to simplify and enhance the development in JAX"
 readme = "README.md"
@@ -22,7 +22,7 @@ classifiers = [
 	"Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-	"jax>=0.8.2",
+	"jax>=0.9.0",
 	"optax>=0.2.2",
 	"ml-collections==1.1.0",
 	"plum-dispatch==2.3.2",

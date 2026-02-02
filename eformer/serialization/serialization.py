@@ -356,6 +356,8 @@ def tree_deserialize_leaves(
     prefix: str | None = None,
     partition_rules: tuple[tuple[str, PartitionSpec]] | None = None,
     shardings: PyTree | dict[Callable] | None = None,
+    callback: Callable[[jax.Array, str], jax.Array] | None = None,
+    chunk_size: int | None = None,
 ):
     """Deserialize a PyTree of arrays from a TensorStore checkpoint.
 
@@ -368,6 +370,9 @@ def tree_deserialize_leaves(
         manager: Optional GlobalAsyncCheckpointManager. If None, creates a new one.
         prefix: Optional prefix to filter/load specific tree (e.g., 'model', 'optimizer').
         shardings: sharding specifications matching checkpoint structure.
+        callback: Optional callback to process each loaded array by key.
+        chunk_size: Optional number of arrays to load per batch. If set, loads in
+            chunks and waits between batches to reduce peak memory usage.
 
     Returns:
         Deserialized pytree structure with loaded arrays.
@@ -442,19 +447,37 @@ def tree_deserialize_leaves(
             )
             partition_rules = [NamedSharding(mesh=mesh, spec=partition_rules[k.replace(".", "/")]) for k in keys]
             apply_tree_shardings = partition_rules
-        if paths_to_load:
-            deser_leaves = manager.deserialize_with_paths(shardings=apply_tree_shardings, paths=paths_to_load)
-        else:
-            deser_leaves = []
-
         result = {}
-        for key, array in zip(keys, deser_leaves, strict=False):
-            parts = key.split(".")
-            current = result
-            for part in parts[:-1]:
-                if part not in current:
-                    current[part] = {}
-                current = current[part]
-            current[parts[-1]] = array
+        if paths_to_load:
+            if chunk_size is None or chunk_size <= 0:
+                deser_leaves = manager.deserialize_with_paths(shardings=apply_tree_shardings, paths=paths_to_load)
+                for key, array in zip(keys, deser_leaves, strict=False):
+                    if callback is not None:
+                        array = callback(array, key)
+                    parts = key.split(".")
+                    current = result
+                    for part in parts[:-1]:
+                        if part not in current:
+                            current[part] = {}
+                        current = current[part]
+                    current[parts[-1]] = array
+            else:
+                for start in range(0, len(paths_to_load), chunk_size):
+                    end = min(start + chunk_size, len(paths_to_load))
+                    chunk_paths = paths_to_load[start:end]
+                    chunk_shardings = apply_tree_shardings[start:end]
+                    chunk_keys = keys[start:end]
+                    deser_leaves = manager.deserialize_with_paths(shardings=chunk_shardings, paths=chunk_paths)
+                    manager.wait_until_finished()
+                    for key, array in zip(chunk_keys, deser_leaves, strict=False):
+                        if callback is not None:
+                            array = callback(array, key)
+                        parts = key.split(".")
+                        current = result
+                        for part in parts[:-1]:
+                            if part not in current:
+                                current[part] = {}
+                            current = current[part]
+                        current[parts[-1]] = array
 
         return result

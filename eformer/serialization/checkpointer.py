@@ -837,6 +837,7 @@ class Checkpointer:
         callback: tp.Callable[[jax.Array, str], jax.Array] | None = None,
         template: PyTree | None = None,
         strict_shapes: bool = True,
+        chunk_size: int | None = None,
     ) -> tuple[PyTree, MetadataDict]:
         """Load a treedef-preserving PyTree saved under a specific prefix.
 
@@ -867,6 +868,7 @@ class Checkpointer:
             callback: Optional callback function to process each loaded array.
                 Receives (array, key_path) and should return the processed array.
                 Useful for custom transformations during loading.
+            chunk_size: Optional number of arrays to load per batch.
 
         Returns:
             A tuple of (pytree, extras_metadata) where:
@@ -930,6 +932,8 @@ class Checkpointer:
                 dtype=dtype,
                 strict_shapes=strict_shapes,
                 template=template,
+                callback=callback,
+                chunk_size=chunk_size,
             )
 
         else:
@@ -940,6 +944,7 @@ class Checkpointer:
                 partition_rules=partition_rules,
                 dtype=dtype,
                 callback=callback,
+                chunk_size=chunk_size,
             )
         try:
             metadata = _read_checkpoint_metadata(str(self._manager.safe_loadpath(root)))

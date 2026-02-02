@@ -25,6 +25,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+import fsspec
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -41,6 +42,7 @@ from eformer.paths import ePath, ePathLike
 from eformer.pytree import PyTree, flatten_dict, is_flatten, serialization, unflatten_dict
 from eformer.serialization.serialization import leaf_key_paths
 
+from . import fsspec_utils
 from .base_manager import CheckpointManager
 from .serialization import tree_deserialize_leaves, tree_serialize_leaves
 from .utils import derive_base_prefix_from_path, index_filename
@@ -608,6 +610,8 @@ class AsyncCheckpointManager:
         partition_rules: tuple[tuple[str, PartitionSpec]] | None = None,
         mesh: Mesh | None = None,
         prefix: str | None = None,
+        callback: tp.Callable[[jax.Array, str], jax.Array] | None = None,
+        chunk_size: int | None = None,
     ) -> tuple[dict, dict]:
         """Load checkpoint saved with tensorstore using core deserialization.
 
@@ -617,6 +621,8 @@ class AsyncCheckpointManager:
             partition_rules: Pattern-based partition rules.
             mesh: JAX mesh for distributed computation.
             prefix: Optional prefix for loading specific tree.
+            callback: Optional callback to process each loaded array by key.
+            chunk_size: Optional number of arrays to load per batch.
 
         Returns:
             Tuple of (loaded tree dictionary, metadata dictionary).
@@ -629,6 +635,8 @@ class AsyncCheckpointManager:
             manager=self.global_manager,
             prefix=prefix,
             shardings=shardings,
+            callback=callback,
+            chunk_size=chunk_size,
         )
         self.global_manager.wait_until_finished()
 
@@ -656,6 +664,7 @@ class AsyncCheckpointManager:
         prefix_filter: str | None = None,
         prefix: str | None = None,
         use_async: bool = True,
+        chunk_size: int | None = None,
     ) -> tuple[PyTree | dict, dict]:
         """Synchronous load method that can work with or without async.
 
@@ -679,6 +688,7 @@ class AsyncCheckpointManager:
             prefix: Optional prefix for loading specific tree (e.g., 'model', 'optimizer').
                 Required when checkpoint contains multiple prefixes.
             use_async: Whether to use parallel loading (faster) or sequential loading.
+            chunk_size: Optional number of arrays to load per batch when using TensorStore.
 
         Returns:
             Tuple of (loaded tree, metadata dictionary).
@@ -704,10 +714,43 @@ class AsyncCheckpointManager:
         is_tensorstore = False
         path_obj = ePath(path_str)
         if path_obj.is_dir():
-            if (path_obj / "tensorstore_index.json").exists():
-                is_tensorstore = True
-            elif any((path_obj / d / ".zarray").exists() for d in os.listdir(path_str) if (path_obj / d).is_dir()):
-                is_tensorstore = True
+            try:
+                if fsspec_utils.exists(fsspec_utils.join_path(path_str, "tensorstore_index.json")):
+                    is_tensorstore = True
+                else:
+                    fs, base_path = fsspec.core.url_to_fs(path_str)
+                    try:
+                        entries = fs.ls(base_path, detail=True)
+                    except (OSError, FileNotFoundError):
+                        entries = []
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            entry_path = entry.get("name", "")
+                            is_dir = entry.get("type") == "directory"
+                        else:
+                            entry_path = entry
+                            try:
+                                is_dir = fs.isdir(entry_path)
+                            except (OSError, FileNotFoundError):
+                                is_dir = False
+                        if not is_dir:
+                            continue
+                        zarray_path = f"{entry_path.rstrip('/')}/.zarray"
+                        if fs.exists(zarray_path):
+                            is_tensorstore = True
+                            break
+            except (ImportError, ModuleNotFoundError):
+                # Fall back to ePath for backends without fsspec support (e.g., gs:// without gcsfs).
+                if (path_obj / "tensorstore_index.json").exists():
+                    is_tensorstore = True
+                else:
+                    try:
+                        for entry in path_obj.iterdir():
+                            if entry.is_dir() and (entry / ".zarray").exists():
+                                is_tensorstore = True
+                                break
+                    except (OSError, FileNotFoundError):
+                        pass
 
         if is_tensorstore:
             if use_async:
@@ -717,6 +760,8 @@ class AsyncCheckpointManager:
                     partition_rules=partition_rules,
                     shardings=shardings,
                     prefix=prefix,
+                    callback=callback,
+                    chunk_size=chunk_size,
                 )
             else:
                 tree = tree_deserialize_leaves(
@@ -726,6 +771,8 @@ class AsyncCheckpointManager:
                     manager=self.global_manager,
                     prefix=prefix,
                     shardings=shardings,
+                    callback=callback,
+                    chunk_size=chunk_size,
                 )
                 self.global_manager.wait_until_finished()
                 meta_path = path_obj / "checkpoint_metadata.json"
@@ -1089,6 +1136,8 @@ class AsyncCheckpointManager:
         dtype: jnp.dtype | None = None,
         template: PyTree | None = None,
         strict_shapes: bool = True,
+        callback: tp.Callable[[jax.Array, str], jax.Array] | None = None,
+        chunk_size: int | None = None,
     ) -> tuple[PyTree, dict]:
         """Load a PyTree saved by save_pytree with the same prefix.
 
@@ -1103,6 +1152,8 @@ class AsyncCheckpointManager:
             partition_rules: Optional sequence of (regex, PartitionSpec) tuples for
                 pattern-based array sharding.
             dtype: Optional data type to cast arrays to after loading.
+            callback: Optional callback to process each loaded array by key.
+            chunk_size: Optional number of arrays to load per batch.
 
         Returns:
             Tuple of (loaded PyTree, metadata dictionary).
@@ -1172,16 +1223,39 @@ class AsyncCheckpointManager:
                 shardings.get(k, default_sharding()) if shardings else default_sharding() for k in array_keys
             ]
 
-        array_leaves = self.global_manager.deserialize_with_paths(shardings=apply_shardings, paths=abs_paths)
-        self.global_manager.wait_until_finished()
-        expected_arrays = sum(arr_mask)
-        if len(array_leaves) != expected_arrays:
-            raise ValueError(
-                f"Loaded {len(array_leaves)} arrays but structure expects {expected_arrays}. "
-                "Index or structure may be stale."
-            )
-        if dtype is not None:
-            array_leaves = [jnp.asarray(x, dtype=dtype) for x in array_leaves]
+        if chunk_size is None or chunk_size <= 0:
+            array_leaves = self.global_manager.deserialize_with_paths(shardings=apply_shardings, paths=abs_paths)
+            self.global_manager.wait_until_finished()
+            expected_arrays = sum(arr_mask)
+            if len(array_leaves) != expected_arrays:
+                raise ValueError(
+                    f"Loaded {len(array_leaves)} arrays but structure expects {expected_arrays}. "
+                    "Index or structure may be stale."
+                )
+            if dtype is not None:
+                array_leaves = [jnp.asarray(x, dtype=dtype) for x in array_leaves]
+            if callback is not None:
+                array_leaves = [callback(arr, key) for arr, key in zip(array_leaves, array_keys, strict=False)]
+        else:
+            array_leaves = []
+            expected_arrays = sum(arr_mask)
+            for start in range(0, len(abs_paths), chunk_size):
+                end = min(start + chunk_size, len(abs_paths))
+                chunk_paths = abs_paths[start:end]
+                chunk_shardings = apply_shardings[start:end]
+                chunk_keys = array_keys[start:end]
+                chunk_arrays = self.global_manager.deserialize_with_paths(shardings=chunk_shardings, paths=chunk_paths)
+                self.global_manager.wait_until_finished()
+                if dtype is not None:
+                    chunk_arrays = [jnp.asarray(x, dtype=dtype) for x in chunk_arrays]
+                if callback is not None:
+                    chunk_arrays = [callback(arr, key) for arr, key in zip(chunk_arrays, chunk_keys, strict=False)]
+                array_leaves.extend(chunk_arrays)
+            if len(array_leaves) != expected_arrays:
+                raise ValueError(
+                    f"Loaded {len(array_leaves)} arrays but structure expects {expected_arrays}. "
+                    "Index or structure may be stale."
+                )
 
         if template is None:
             leaves_full = [None] * len(leaf_keys_full)
