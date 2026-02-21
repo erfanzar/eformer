@@ -21,8 +21,10 @@ It includes the `PartitionAxis` class for defining logical-to-physical axis mapp
 and the `PartitionManager` context manager for applying these rules.
 """
 
+import contextvars
 import dataclasses
 import hashlib
+import threading
 import typing as tp
 
 import jax
@@ -62,22 +64,42 @@ from eformer.pytree import PyTree, xTree
 
 from .constraints import get_corrected_named_sharding, with_sharding_constraint
 
+_CURRENT_PARTITION_MANAGER = contextvars.ContextVar("_CURRENT_PARTITION_MANAGER", default=None)
+_LAST_PARTITION_MANAGER: tp.Any = None
+
+
+def _to_hashable(value: tp.Any) -> tp.Any:
+    """Convert nested structures and dataclass-like objects to hashable tuples."""
+    if dataclasses.is_dataclass(value):
+        value = {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
+
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _to_hashable(v)) for k, v in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_to_hashable(v) for v in value)
+    if isinstance(value, set):
+        return tuple(sorted(_to_hashable(v) for v in value))
+    if hasattr(value, "__dict__"):
+        return (value.__class__.__qualname__, _to_hashable(vars(value)))
+
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
 
 def hash_fn(self) -> int:
-    """Compute a hash value for an object based on its dictionary values.
+    """Compute a hash value using dataclass fields (or object dict fallback)."""
+    if dataclasses.is_dataclass(self):
+        payload = tuple(
+            (field.name, _to_hashable(getattr(self, field.name)))
+            for field in dataclasses.fields(self)
+            if field.compare
+        )
+        return hash((self.__class__.__qualname__, payload))
 
-    Creates a hash by concatenating string representations of hashable
-    attribute values (int, float, bool, dict, list) and computing an
-    MD5 hash of the result.
-
-    Args:
-        self: The object to hash (bound method).
-
-    Returns:
-        An integer hash value derived from the object's attributes.
-    """
-    shu = "".join(str(cu) for cu in self.__dict__.values() if isinstance(cu, float | int | float | bool | dict | list))
-    return get_safe_hash_int(shu)
+    return hash((self.__class__.__qualname__, _to_hashable(vars(self))))
 
 
 def get_safe_hash_int(text, algorithm="md5"):
@@ -230,6 +252,141 @@ class PartitionAxis(xTree):
 	attribute names. Used to apply different sharding rules during generation modes.
 	"""
 
+    _REGISTRY_LOCK: tp.ClassVar[threading.RLock] = threading.RLock()
+    _REGISTERED_SEMANTIC_MAP: tp.ClassVar[dict[str, tp.Any]] = {}
+    _REGISTERED_GENERATION_MAP: tp.ClassVar[dict[str, tp.Any]] = {}
+
+    @classmethod
+    def register(
+        cls,
+        semantic_axis: str,
+        axis_rule: tp.Any,
+        *,
+        generation_axis_rule: tp.Any = NOT_GIVEN,
+        override: bool = False,
+    ) -> None:
+        """Register a semantic axis mapping globally.
+
+        This updates a process-global registry used by all current/future
+        ``PartitionAxis`` instances. Mapping values may be:
+        - an attribute name on ``PartitionAxis`` (for example ``"head_axis"``),
+        - a literal mesh axis name (for example ``"tp"``),
+        - a tuple/list of either of the above,
+        - or ``None``.
+
+        Args:
+            semantic_axis: Semantic axis token to register.
+            axis_rule: Resolution rule for standard/train mode.
+            generation_axis_rule: Optional explicit rule for generation modes.
+                If omitted and ``axis_rule`` maps to a known standard attribute,
+                the corresponding decode attribute mapping is inferred.
+            override: If ``False``, raises when ``semantic_axis`` already exists
+                in built-in or custom maps. Set ``True`` to replace existing rules.
+        """
+        name = str(semantic_axis).strip()
+        if not name:
+            raise ValueError("`semantic_axis` must be a non-empty string.")
+
+        with cls._REGISTRY_LOCK:
+            is_existing_builtin = name in cls._SEMANTIC_MAP
+            is_existing_custom = name in cls._REGISTERED_SEMANTIC_MAP
+            if not override and (is_existing_builtin or is_existing_custom):
+                raise ValueError(
+                    f"Semantic axis '{name}' already exists. Use override=True to replace it."
+                )
+
+            cls._REGISTERED_SEMANTIC_MAP[name] = axis_rule
+            if generation_axis_rule is NOT_GIVEN:
+                inferred = None
+                if isinstance(axis_rule, str):
+                    inferred = cls._STANDARD_TO_GENERATION_ATTR_MAP.get(axis_rule)
+                if inferred is not None:
+                    cls._REGISTERED_GENERATION_MAP[name] = inferred
+                else:
+                    cls._REGISTERED_GENERATION_MAP.pop(name, None)
+            else:
+                cls._REGISTERED_GENERATION_MAP[name] = generation_axis_rule
+
+    @classmethod
+    def unregister(cls, semantic_axis: str, *, missing_ok: bool = True) -> None:
+        """Remove a previously registered semantic axis mapping."""
+        name = str(semantic_axis).strip()
+        if not name:
+            raise ValueError("`semantic_axis` must be a non-empty string.")
+        with cls._REGISTRY_LOCK:
+            removed = False
+            if name in cls._REGISTERED_SEMANTIC_MAP:
+                cls._REGISTERED_SEMANTIC_MAP.pop(name, None)
+                removed = True
+            if name in cls._REGISTERED_GENERATION_MAP:
+                cls._REGISTERED_GENERATION_MAP.pop(name, None)
+                removed = True
+            if not removed and not missing_ok:
+                raise KeyError(f"Semantic axis '{name}' is not registered.")
+
+    @classmethod
+    def clear_registered_axes(cls) -> None:
+        """Clear all custom semantic axis registrations."""
+        with cls._REGISTRY_LOCK:
+            cls._REGISTERED_SEMANTIC_MAP.clear()
+            cls._REGISTERED_GENERATION_MAP.clear()
+
+    @classmethod
+    def get_registered_axes(cls) -> dict[str, dict[str, tp.Any]]:
+        """Return a snapshot of globally registered custom axis mappings."""
+        with cls._REGISTRY_LOCK:
+            return {
+                name: {
+                    "axis_rule": cls._REGISTERED_SEMANTIC_MAP[name],
+                    "generation_axis_rule": cls._REGISTERED_GENERATION_MAP.get(name, NOT_GIVEN),
+                }
+                for name in cls._REGISTERED_SEMANTIC_MAP
+            }
+
+    @classmethod
+    def _lookup_semantic_mapping(cls, semantic_axis: str) -> tp.Any:
+        """Lookup semantic mapping from custom registry, then built-ins."""
+        if semantic_axis in cls._REGISTERED_SEMANTIC_MAP:
+            return cls._REGISTERED_SEMANTIC_MAP[semantic_axis]
+        return cls._SEMANTIC_MAP.get(semantic_axis)
+
+    @classmethod
+    def _lookup_generation_mapping(cls, semantic_axis: str) -> tp.Any:
+        """Lookup generation mapping from custom registry."""
+        return cls._REGISTERED_GENERATION_MAP.get(semantic_axis, NOT_GIVEN)
+
+    def _resolve_axis_rule(self, axis_rule: tp.Any, _visited: set[str] | None = None) -> tp.Any:
+        """Resolve rule references (attribute names or semantic aliases) to concrete axis rules."""
+        if isinstance(axis_rule, list):
+            return [
+                self._resolve_axis_rule(
+                    item,
+                    _visited=set(_visited) if _visited is not None else None,
+                )
+                for item in axis_rule
+            ]
+        if isinstance(axis_rule, tuple):
+            return tuple(
+                self._resolve_axis_rule(
+                    item,
+                    _visited=set(_visited) if _visited is not None else None,
+                )
+                for item in axis_rule
+            )
+        if isinstance(axis_rule, str):
+            if hasattr(self, axis_rule):
+                return getattr(self, axis_rule)
+
+            mapped = self._lookup_semantic_mapping(axis_rule)
+            if mapped is not None:
+                visited = set() if _visited is None else set(_visited)
+                if axis_rule in visited:
+                    raise ValueError(f"Cyclic semantic axis registration detected at '{axis_rule}'.")
+                visited.add(axis_rule)
+                return self._resolve_axis_rule(mapped, _visited=visited)
+
+        return axis_rule
+
     def __post_init__(self):
         """
         Post-initialization hook to resolve default axis values.
@@ -334,35 +491,57 @@ class PartitionAxis(xTree):
             if axis_name is None or axis_name == "_":
                 resolved_rules.append(None)
                 continue
-            if isinstance(axis_name, list):
-                standard_attr_name = [self._SEMANTIC_MAP.get(axis) or axis for axis in axis_name]
 
+            # Composite axis rules can include direct mesh names and/or semantic names.
+            if isinstance(axis_name, (list, tuple)):
+                standard_rule = []
+                for sub_axis in axis_name:
+                    sub_mapped = self._lookup_semantic_mapping(sub_axis)
+                    standard_rule.append(sub_axis if sub_mapped is None else sub_mapped)
             else:
-                standard_attr_name = self._SEMANTIC_MAP.get(axis_name)
-            if standard_attr_name is None:
-                raise ValueError(f"Unknown semantic axis name: '{axis_name}'")
+                standard_rule = self._lookup_semantic_mapping(axis_name)
+                if standard_rule is None:
+                    raise ValueError(f"Unknown semantic axis name: '{axis_name}'")
 
-            target_attr_name = standard_attr_name
+            target_rule = standard_rule
             if mode in GENERATION_MODES:
-                gen_attr_name = self._STANDARD_TO_GENERATION_ATTR_MAP.get(standard_attr_name)
-                if gen_attr_name:
-                    if hasattr(self, gen_attr_name):
-                        gen_val = getattr(self, gen_attr_name)
-                        if gen_val is not None and gen_val is not NOT_GIVEN:
-                            target_attr_name = gen_attr_name
+                if isinstance(axis_name, (list, tuple)):
+                    gen_composite = []
+                    any_changed = False
+                    for idx, sub_axis in enumerate(axis_name):
+                        sub_standard = standard_rule[idx]
+                        sub_target = sub_standard
 
-            try:
-                if isinstance(target_attr_name, list):
-                    mesh_axis_rule = [getattr(self, attr_name) for attr_name in target_attr_name]
+                        sub_gen = self._lookup_generation_mapping(sub_axis)
+                        if sub_gen is not NOT_GIVEN:
+                            sub_target = sub_gen
+                            any_changed = True
+                        elif isinstance(sub_standard, str):
+                            sub_gen_attr = self._STANDARD_TO_GENERATION_ATTR_MAP.get(sub_standard)
+                            if sub_gen_attr and hasattr(self, sub_gen_attr):
+                                sub_gen_val = getattr(self, sub_gen_attr)
+                                if sub_gen_val is not None and sub_gen_val is not NOT_GIVEN:
+                                    sub_target = sub_gen_attr
+                                    any_changed = True
+
+                        gen_composite.append(sub_target)
+                    if any_changed:
+                        target_rule = gen_composite
                 else:
-                    mesh_axis_rule: AxisType = getattr(self, target_attr_name)
-            except AttributeError as e:
-                raise LookupError(
-                    f"Internal error: Attribute '{target_attr_name}' not found in PartitionAxis instance."
-                ) from e
+                    custom_gen_rule = self._lookup_generation_mapping(axis_name)
+                    if custom_gen_rule is not NOT_GIVEN:
+                        target_rule = custom_gen_rule
+                    elif isinstance(standard_rule, str):
+                        gen_attr_name = self._STANDARD_TO_GENERATION_ATTR_MAP.get(standard_rule)
+                        if gen_attr_name and hasattr(self, gen_attr_name):
+                            gen_val = getattr(self, gen_attr_name)
+                            if gen_val is not None and gen_val is not NOT_GIVEN:
+                                target_rule = gen_attr_name
+
+            mesh_axis_rule = self._resolve_axis_rule(target_rule)
 
             if mesh_axis_rule is NOT_GIVEN:
-                raise ValueError(f"Resolved axis rule for '{axis_name}' ('{target_attr_name}') is still NOT_GIVEN.")
+                raise ValueError(f"Resolved axis rule for '{axis_name}' is still NOT_GIVEN.")
 
             resolved_rules.append(mesh_axis_rule)
         return resolved_rules
@@ -420,8 +599,24 @@ class PartitionManager(PyTree):
     paxis: PartitionAxis
 
     def __post_init__(self):
+        global _LAST_PARTITION_MANAGER
         if not isinstance(self.paxis, PartitionAxis):
             raise TypeError(f"Expected PartitionAxis, got {type(self.paxis)}")
+        _LAST_PARTITION_MANAGER = self
+
+    def __enter__(self):
+        global _LAST_PARTITION_MANAGER
+        token = _CURRENT_PARTITION_MANAGER.set(self)
+        object.__setattr__(self, "_context_token", token)
+        _LAST_PARTITION_MANAGER = self
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        token = getattr(self, "_context_token", None)
+        if token is not None:
+            _CURRENT_PARTITION_MANAGER.reset(token)
+            object.__setattr__(self, "_context_token", None)
+        return False
 
     def shard(
         self,
@@ -432,11 +627,10 @@ class PartitionManager(PyTree):
         auto_correct: bool = True,
     ) -> jax.Array:
         """
-        Applies sharding constraint to a JAX array based on the active PartitionManager context.
+        Applies sharding constraint to a JAX array using this manager's PartitionAxis.
 
-        Retrieves the current `PartitionManager` implicitly using `get_current_partition_manager()`
-        and uses its `PartitionAxis` to resolve the semantic axis names (`axes`) into a
-        `PartitionSpec`. It then applies the sharding constraint to the array `x`.
+        Uses this `PartitionManager` instance to resolve semantic axis names (`axes`)
+        into a `PartitionSpec`, then applies the sharding constraint to `x`.
 
         Supports specifying axes and mode directly, or providing a `DynamicShardingAxes`
         named tuple. Can also infer the mode based on a dimension size if an integer
@@ -460,7 +654,6 @@ class PartitionManager(PyTree):
             The array `x` with the sharding constraint applied.
 
         Raises:
-            LookupError: If called outside of an active `PartitionManager` context.
             ValueError: If neither `axes`/`mode` nor `dynamic_axes` are provided.
             ValueError: Propagated from `PartitionAxis.resolve_spec` or if resolved
                 axis rule is NOT_GIVEN.
@@ -516,9 +709,13 @@ class PartitionManager(PyTree):
             >>> # Dynamic mode detection (decode if dim 1 has size 1)
             >>> spec = manager.resolve([BATCH, LENGTH, HEAD], mode=1, shape=x.shape)
         """
-        if isinstance(axes, type) and issubclass(axes, tuple) and hasattr(axes, "_fields"):
-            dynamic_axes = axes
-            axes = NOT_GIVEN
+        if dynamic_axes is NOT_GIVEN and axes is not NOT_GIVEN:
+            if isinstance(axes, tuple) and hasattr(axes, "_fields"):
+                dynamic_axes = axes
+                axes = NOT_GIVEN
+            elif isinstance(axes, type) and issubclass(axes, tuple) and hasattr(axes, "_fields"):
+                dynamic_axes = DynamicShardingAxes(axes=axes.axes, mode=axes.mode)
+                axes = NOT_GIVEN
 
         if axes is NOT_GIVEN or mode is NOT_GIVEN:
             if dynamic_axes is NOT_GIVEN:
@@ -542,9 +739,19 @@ class PartitionManager(PyTree):
     __hash__ = hash_fn
 
 
+def get_current_partition_manager() -> PartitionManager | None:
+    """Get the current context-local partition manager, if set."""
+    return _CURRENT_PARTITION_MANAGER.get()
+
+
+def get_partition_manager() -> PartitionManager | None:
+    """Get the last created partition manager instance."""
+    return _LAST_PARTITION_MANAGER
+
+
 def apply_logical_sharding(
     x: jax.Array,
-    partition_manager: PartitionManager,
+    partition_manager: PartitionManager | None = NOT_GIVEN,
     axes: tp.Sequence[str | None] = NOT_GIVEN,
     mode: RUNTIME_MODE_TYPES | int = NOT_GIVEN,  # type:ignore
     dynamic_axes: DynamicShardingAxes | None = NOT_GIVEN,
@@ -561,6 +768,8 @@ def apply_logical_sharding(
     Args:
         x: The JAX array to apply sharding to.
         partition_manager: An explicit `PartitionManager` instance to use.
+            If not provided, the function tries the current context manager
+            first, then the last created manager.
         axes: A sequence of semantic axis name strings or None. Required if
               `dynamic_axes` is NOT_GIVEN and `partition_manager` is NOT_GIVEN.
         mode: The runtime mode or dimension index for inference. Required if
@@ -578,7 +787,16 @@ def apply_logical_sharding(
                         when a manager is found or provided.
     """
 
-    return partition_manager.shard(
+    resolved_manager = partition_manager
+    if resolved_manager is NOT_GIVEN or resolved_manager is None:
+        resolved_manager = get_current_partition_manager() or get_partition_manager()
+    if resolved_manager is None:
+        raise ValueError(
+            "No PartitionManager is available. "
+            "Provide `partition_manager` or use `with PartitionManager(...)`."
+        )
+
+    return resolved_manager.shard(
         x=x,
         axes=axes,
         mode=mode,

@@ -309,6 +309,13 @@ class ExpertActivationsAlt(DynamicShardingAxes):
     mode: tp.ClassVar = MODE_TRAIN
 
 
+class ExpertTensorParallel(DynamicShardingAxes):
+    """Expert Tensor Parallelism (EPxTP) sharding axes."""
+
+    axes: tp.ClassVar = [TP, EMPTY, EMPTY]
+    mode: tp.ClassVar = MODE_TRAIN
+
+
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 """Default value used for masking, typically in attention mechanisms."""
 NOT_GIVEN = _Empty()

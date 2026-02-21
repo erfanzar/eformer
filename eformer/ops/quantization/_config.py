@@ -27,7 +27,7 @@ from .implicit_array_8bit import Array8B, straight_through_8bit
 from .implicit_array_nf4 import ArrayNF4, straight_through_nf4
 
 
-class QuantizationType(str, enum.Enum):
+class QuantizationType(enum.StrEnum):
     """Supported quantization types."""
 
     NF4 = "nf4"  # 4-bit NormalFloat (optimized for Gaussian distributions)

@@ -84,7 +84,7 @@ StaticScalar = np.bool_ | np.number | bool | int | float | complex
 ArrayLike = jax.Array | np.ndarray | StaticScalar
 
 
-class OrginArray(ABC):
+class OrginArray(ABC):  # noqa:B024
     """Abstract base class for array-like types in the implicit array system.
 
     This class serves as a registry for types that should be treated as

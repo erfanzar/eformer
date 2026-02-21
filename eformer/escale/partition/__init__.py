@@ -86,6 +86,8 @@ from .manager import (
     PartitionAxis,
     PartitionManager,
     apply_logical_sharding,
+    get_current_partition_manager,
+    get_partition_manager,
 )
 
 __all__ = (
@@ -102,10 +104,12 @@ __all__ = (
     "extract_shardings",
     "get_axes_size_in_mesh",
     "get_corrected_named_sharding",
+    "get_current_partition_manager",
     "get_incontext_mesh",
     "get_mesh_axis_names",
     "get_mesh_axis_size",
     "get_names_from_partition_spec",
+    "get_partition_manager",
     "get_partition_spec",
     "get_shardings_with_structure",
     "get_submesh_device_index",

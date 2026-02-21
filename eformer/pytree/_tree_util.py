@@ -20,7 +20,7 @@ import functools
 import typing as tp
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
-from enum import Enum
+from enum import StrEnum
 from typing import Any, TypeVar, cast, overload
 
 import jax
@@ -37,7 +37,7 @@ from eformer.loggings import get_logger
 from ._pytree import PyTree, auto_pytree
 
 
-class NonePolicy(str, Enum):
+class NonePolicy(StrEnum):
     """Policy for handling None values in tree operations.
 
     Attributes:
