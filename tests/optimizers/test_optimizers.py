@@ -46,6 +46,7 @@ from eformer.optimizers import (
     register_optimizer,
     register_scheduler,
 )
+from eformer.optimizers._tx import create_cosine_scheduler, create_linear_scheduler
 from eformer.optimizers._base import _OPTIMIZER_BUILDER_REGISTRY, _SCHEDULER_BUILDER_REGISTRY
 
 
@@ -208,7 +209,16 @@ class TestSchedulerFactory:
         assert scheduler(0) == pytest.approx(1e-8, rel=1e-2)
         assert scheduler(100) == pytest.approx(0.001, rel=1e-3)
         # Linear scheduler with warmup has slight precision differences
-        assert scheduler(1000) == pytest.approx(0.00019, rel=1e-1)
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-2)
+
+    def test_linear_scheduler_with_warmup_uses_total_steps(self):
+        config = SchedulerConfig(
+            scheduler_type="linear", learning_rate=0.001, learning_rate_end=0.0001, steps=1000, warmup_steps=100
+        )
+        scheduler = SchedulerFactory.create_scheduler(config)
+        assert scheduler(config.warmup_steps) == pytest.approx(0.001, rel=1e-3)
+        assert scheduler(config.steps) == pytest.approx(config.learning_rate_end, rel=1e-3)
+        assert scheduler(config.steps - 1) > scheduler(config.steps)
 
     def test_cosine_scheduler_without_warmup(self):
         config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.001, steps=1000)
@@ -216,11 +226,31 @@ class TestSchedulerFactory:
         assert scheduler(0) == 0.001
         assert scheduler(1000) < 0.001
 
+    def test_cosine_scheduler_without_warmup_with_learning_rate_end(self):
+        config = SchedulerConfig(
+            scheduler_type="cosine", learning_rate=0.001, learning_rate_end=0.0001, steps=1000
+        )
+        scheduler = SchedulerFactory.create_scheduler(config)
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-3)
+
     def test_cosine_scheduler_with_warmup(self):
         config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.001, steps=1000, warmup_steps=100)
         scheduler = SchedulerFactory.create_scheduler(config)
         assert scheduler(0) == pytest.approx(1e-8, rel=1e-2)
         assert scheduler(100) == pytest.approx(0.001, rel=1e-3)
+        assert scheduler(1000) == pytest.approx(0.0, abs=1e-12)
+
+    def test_cosine_scheduler_with_warmup_uses_total_steps_and_end_value(self):
+        config = SchedulerConfig(
+            scheduler_type="cosine",
+            learning_rate=0.001,
+            learning_rate_end=0.0001,
+            steps=1000,
+            warmup_steps=100,
+            exponent=1.0,
+        )
+        scheduler = SchedulerFactory.create_scheduler(config)
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-3)
 
     def test_custom_scheduler(self):
         config = SchedulerConfig(steps=1000)
@@ -537,14 +567,62 @@ class TestBuilderPattern:
         assert schedule(0) == pytest.approx(0.01, rel=1e-3)
         assert schedule(1000) == pytest.approx(0.001, rel=1e-3)
 
+    def test_linear_scheduler_builder_with_warmup_reaches_step_count(self):
+        config = SchedulerConfig(scheduler_type="linear", learning_rate=0.01, learning_rate_end=0.001, steps=1000, warmup_steps=100)
+        builder = LinearSchedulerBuilder(config=config)
+        schedule = builder.build()
+        assert schedule(config.steps) == pytest.approx(0.001, rel=1e-3)
+
     def test_cosine_scheduler_builder_build(self):
         """Test CosineSchedulerBuilder builds correct schedule."""
-        config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.01, steps=1000)
+        config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.01, learning_rate_end=0.001, steps=1000)
         builder = CosineSchedulerBuilder(config=config)
 
         schedule = builder.build()
         assert schedule(0) == 0.01
-        assert schedule(1000) < 0.01
+        assert schedule(1000) == pytest.approx(0.001, rel=1e-3)
+
+    def test_cosine_scheduler_builder_with_warmup_reaches_end(self):
+        config = SchedulerConfig(
+            scheduler_type="cosine",
+            learning_rate=0.01,
+            learning_rate_end=0.001,
+            steps=1000,
+            warmup_steps=100,
+        )
+        builder = CosineSchedulerBuilder(config=config)
+        schedule = builder.build()
+        assert schedule(1000) == pytest.approx(0.001, rel=1e-3)
+
+
+class TestTxSchedulerHelpers:
+    """Test tx scheduler helper functions."""
+
+    def test_create_linear_scheduler_with_warmup_reaches_end(self):
+        scheduler = create_linear_scheduler(
+            steps=1000,
+            learning_rate_start=0.001,
+            learning_rate_end=0.0001,
+            warmup_steps=100,
+        )
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-2)
+
+    def test_create_cosine_scheduler_without_warmup_with_end(self):
+        scheduler = create_cosine_scheduler(
+            steps=1000,
+            learning_rate=0.001,
+            learning_rate_end=0.0001,
+        )
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-3)
+
+    def test_create_cosine_scheduler_with_warmup_reaches_end(self):
+        scheduler = create_cosine_scheduler(
+            steps=1000,
+            learning_rate=0.001,
+            learning_rate_end=0.0001,
+            warmup_steps=100,
+        )
+        assert scheduler(1000) == pytest.approx(0.0001, rel=1e-3)
 
     def test_builder_validate_hook_called(self):
         """Test that validate() hook is called during factory creation."""

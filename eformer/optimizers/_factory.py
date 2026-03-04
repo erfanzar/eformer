@@ -113,10 +113,14 @@ class SchedulerFactory:
         Returns:
             optax.Schedule: The created linear scheduler.
         """
+        decay_steps = config.steps
+        if config.warmup_steps:
+            decay_steps = config.steps - config.warmup_steps
+
         base_scheduler = optax.linear_schedule(
             init_value=config.learning_rate,
             end_value=config.learning_rate_end,
-            transition_steps=config.steps,
+            transition_steps=decay_steps,
         )
 
         if config.warmup_steps:
@@ -143,18 +147,24 @@ class SchedulerFactory:
             optax.Schedule: The created cosine scheduler.
         """
         if config.warmup_steps:
+            end_value = config.learning_rate_end or 0.0
             return optax.warmup_cosine_decay_schedule(
                 init_value=1e-8,
                 peak_value=config.learning_rate,
                 warmup_steps=config.warmup_steps,
-                decay_steps=config.steps - config.warmup_steps,
-                end_value=config.learning_rate_end or 0.0,
+                decay_steps=config.steps,
+                end_value=end_value,
                 exponent=config.exponent,
             )
+
+        if config.learning_rate_end is not None and config.learning_rate <= 0:
+            raise ValueError("learning_rate must be greater than 0 when learning_rate_end is set")
+
+        cosine_alpha = 0.0 if config.learning_rate_end is None else config.learning_rate_end / config.learning_rate
         return optax.cosine_decay_schedule(
             init_value=config.learning_rate,
             decay_steps=config.steps,
-            alpha=config.learning_rate_end or 0.0,
+            alpha=cosine_alpha,
         )
 
 

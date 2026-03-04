@@ -122,7 +122,7 @@ def create_linear_scheduler(
     Returns:
         optax.Schedule: The configured scheduler.
     """
-    if warmup_steps is not None:
+    if warmup_steps:
         scheduler_warmup = optax.linear_schedule(
             init_value=5e-8,
             end_value=learning_rate_start,
@@ -162,17 +162,20 @@ def create_cosine_scheduler(
     Returns:
         optax.Schedule: The configured scheduler.
     """
-    if warmup_steps is not None:
+    if warmup_steps:
         return optax.warmup_cosine_decay_schedule(
             init_value=0.5e-7,
             peak_value=learning_rate,
             warmup_steps=warmup_steps,
             decay_steps=steps,
-            end_value=learning_rate_end or 1e-5,
+            end_value=learning_rate_end if learning_rate_end is not None else 0.0,
             exponent=exponent,
         )
-    else:
-        return optax.cosine_decay_schedule(init_value=learning_rate, decay_steps=steps, alpha=learning_rate_end or 0.0)
+    if learning_rate_end is not None and learning_rate <= 0:
+        raise ValueError("learning_rate must be greater than 0 when learning_rate_end is set")
+
+    cosine_alpha = 0.0 if learning_rate_end is None else learning_rate_end / learning_rate
+    return optax.cosine_decay_schedule(init_value=learning_rate, decay_steps=steps, alpha=cosine_alpha)
 
 
 def get_base_optimizer(

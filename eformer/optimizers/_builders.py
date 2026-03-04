@@ -107,10 +107,14 @@ class LinearSchedulerBuilder(SchedulerBuilder):
         if self.config.learning_rate_end is None:
             raise ValueError("Linear scheduler requires learning_rate_end")
 
+        decay_steps = self.config.steps
+        if self.config.warmup_steps:
+            decay_steps = self.config.steps - self.config.warmup_steps
+
         base_scheduler = optax.linear_schedule(
             init_value=self.config.learning_rate,
             end_value=self.config.learning_rate_end,
-            transition_steps=self.config.steps,
+            transition_steps=decay_steps,
         )
 
         if self.config.warmup_steps:
@@ -168,18 +172,24 @@ class CosineSchedulerBuilder(SchedulerBuilder):
                 for a given step count, following a cosine decay pattern.
         """
         if self.config.warmup_steps:
+            end_value = self.config.learning_rate_end or 0.0
             return optax.warmup_cosine_decay_schedule(
                 init_value=1e-8,
                 peak_value=self.config.learning_rate,
                 warmup_steps=self.config.warmup_steps,
-                decay_steps=self.config.steps - self.config.warmup_steps,
-                end_value=self.config.learning_rate_end or 0.0,
+                decay_steps=self.config.steps,
+                end_value=end_value,
                 exponent=self.config.exponent,
             )
+
+        if self.config.learning_rate_end is not None and self.config.learning_rate <= 0:
+            raise ValueError("learning_rate must be greater than 0 when learning_rate_end is set")
+
+        cosine_alpha = 0.0 if self.config.learning_rate_end is None else self.config.learning_rate_end / self.config.learning_rate
         return optax.cosine_decay_schedule(
             init_value=self.config.learning_rate,
             decay_steps=self.config.steps,
-            alpha=self.config.learning_rate_end or 0.0,
+            alpha=cosine_alpha,
         )
 
 
