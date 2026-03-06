@@ -527,7 +527,7 @@ def log_failures_to(parent, suppress: bool = False):
 
         parent._child_failed.remote(handle, ExceptionInfo.ser_exc_info(e))
         if not suppress:
-            raise e
+            raise
 
 
 DEFAULT_LOG_LEVEL = logging.INFO
@@ -595,8 +595,8 @@ class StopwatchActor:
         self._total += 1
 
         if self._total % 1000 == 0:
-            for name, time in self._times_per.items():
-                self._logger.info(f"{name}: {time / self._counts_per[name]}")
+            for key, total_time in self._times_per.items():
+                self._logger.info(f"{key}: {total_time / self._counts_per[key]}")
 
     def get(self, name: str) -> tuple[float, int]:
         """Get total time and count for a named operation.

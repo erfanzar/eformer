@@ -90,11 +90,7 @@ print(json.dumps(result))
         text=True,
     )
 
-    assert proc.returncode == 0, (
-        "Subprocess failed.\n"
-        f"stdout:\n{proc.stdout}\n"
-        f"stderr:\n{proc.stderr}\n"
-    )
+    assert proc.returncode == 0, f"Subprocess failed.\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}\n"
 
     data = _extract_json(proc.stdout)
     import_errors = data.get("import_errors", {})

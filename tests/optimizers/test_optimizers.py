@@ -46,8 +46,8 @@ from eformer.optimizers import (
     register_optimizer,
     register_scheduler,
 )
-from eformer.optimizers._tx import create_cosine_scheduler, create_linear_scheduler
 from eformer.optimizers._base import _OPTIMIZER_BUILDER_REGISTRY, _SCHEDULER_BUILDER_REGISTRY
+from eformer.optimizers._tx import create_cosine_scheduler, create_linear_scheduler
 
 
 class TestSerializationMixin:
@@ -227,9 +227,7 @@ class TestSchedulerFactory:
         assert scheduler(1000) < 0.001
 
     def test_cosine_scheduler_without_warmup_with_learning_rate_end(self):
-        config = SchedulerConfig(
-            scheduler_type="cosine", learning_rate=0.001, learning_rate_end=0.0001, steps=1000
-        )
+        config = SchedulerConfig(scheduler_type="cosine", learning_rate=0.001, learning_rate_end=0.0001, steps=1000)
         scheduler = SchedulerFactory.create_scheduler(config)
         assert scheduler(1000) == pytest.approx(0.0001, rel=1e-3)
 
@@ -568,7 +566,9 @@ class TestBuilderPattern:
         assert schedule(1000) == pytest.approx(0.001, rel=1e-3)
 
     def test_linear_scheduler_builder_with_warmup_reaches_step_count(self):
-        config = SchedulerConfig(scheduler_type="linear", learning_rate=0.01, learning_rate_end=0.001, steps=1000, warmup_steps=100)
+        config = SchedulerConfig(
+            scheduler_type="linear", learning_rate=0.01, learning_rate_end=0.001, steps=1000, warmup_steps=100
+        )
         builder = LinearSchedulerBuilder(config=config)
         schedule = builder.build()
         assert schedule(config.steps) == pytest.approx(0.001, rel=1e-3)

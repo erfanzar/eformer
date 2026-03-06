@@ -16,7 +16,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Literal
+from typing import Literal
 
 import pytest
 
@@ -33,7 +33,7 @@ class Config:
     flag: bool = False
     enabled: bool = True
     count: int = 3
-    opt: Optional[int] = None
+    opt: int | None = None
     mode: Literal["fast", "slow"] = "fast"
     speed: Mode = Mode.fast
     run_id: int = 1
@@ -45,7 +45,7 @@ def test_string_to_bool():
     assert string_to_bool("no") is False
     assert string_to_bool(True) is True
     assert string_to_bool(False) is False
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         string_to_bool("maybe")
 
 

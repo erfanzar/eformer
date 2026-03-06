@@ -185,7 +185,9 @@ class CosineSchedulerBuilder(SchedulerBuilder):
         if self.config.learning_rate_end is not None and self.config.learning_rate <= 0:
             raise ValueError("learning_rate must be greater than 0 when learning_rate_end is set")
 
-        cosine_alpha = 0.0 if self.config.learning_rate_end is None else self.config.learning_rate_end / self.config.learning_rate
+        cosine_alpha = (
+            0.0 if self.config.learning_rate_end is None else self.config.learning_rate_end / self.config.learning_rate
+        )
         return optax.cosine_decay_schedule(
             init_value=self.config.learning_rate,
             decay_steps=self.config.steps,

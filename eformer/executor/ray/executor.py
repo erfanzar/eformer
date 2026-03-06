@@ -137,6 +137,18 @@ def resolve_maybe_refs(items):
     return items
 
 
+def _extract_runtime_env_vars(runtime_env) -> dict[str, str]:
+    """Extract only process environment variables from a Ray runtime_env."""
+    if not runtime_env:
+        return {}
+
+    env_vars = runtime_env.get("env_vars", {}) if hasattr(runtime_env, "get") else {}
+    if not isinstance(env_vars, dict):
+        return {}
+
+    return {str(k): str(v) for k, v in env_vars.items() if v is not None}
+
+
 class RayExecutor:
     """Core executor for Ray-based distributed workloads.
 
@@ -167,8 +179,10 @@ class RayExecutor:
 
     @staticmethod
     def execute(
-        remote_fn: RemoteFunction,
+        remote_fn: RemoteFunction | Callable,
         accelerator_config: AcceleratorConfigType,
+        *args,
+        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a Ray remote function on a single pod or slice.
@@ -199,12 +213,18 @@ class RayExecutor:
             >>> config = GpuAcceleratorConfig(count=1, type="v100")
             >>> result = RayExecutor.execute(compute, config, x=10)
         """
+        if args and _fn_args:
+            raise TypeError("Pass positional remote-function arguments via either *args or _fn_args, not both.")
+
+        call_args = _fn_args or args
+
         if getattr(accelerator_config, "pod_count", 1) != 1:
             raise ValueError("Multi-slice workloads on TPUs should use 'execute_multislice'.")
 
         def do_run(
             remote_fn,
             accelerator_config: AcceleratorConfigType,
+            args,
             kwargs,
         ) -> JobStatus:
             """Internal function to run the remote function with proper resource allocation.
@@ -235,7 +255,7 @@ class RayExecutor:
                     remote_fn=remote_fn,
                     env_vars={ENV_CALL_INDEX: str(idx)},
                 )
-                futures.append(_call.remote(**kwargs))
+                futures.append(_call.remote(*args, **kwargs))
             try:
                 out = ray.get(futures)
                 return JobSucceeded(info, out)
@@ -249,16 +269,20 @@ class RayExecutor:
         if accelerator_config.head_name is None and not isinstance(accelerator_config, TpuAcceleratorConfig):
             do_run = ray.remote(do_run)
         else:
-            default_name = f"TPU-{accelerator_config.tpu_version}-head"
-            resources = {accelerator_config.head_name or default_name: accelerator_config.head_workers}
+            head_name = accelerator_config.head_name
+            if head_name is None and isinstance(accelerator_config, TpuAcceleratorConfig):
+                head_name = f"TPU-{accelerator_config.tpu_version}-head"
+            resources = {head_name: accelerator_config.head_workers} if head_name else {}
             do_run = ray.remote(resources=resources)(do_run)
-        return ray.get(do_run.remote(remote_fn, accelerator_config, kwargs))
+        return ray.get(do_run.remote(remote_fn, accelerator_config, call_args, kwargs))
 
     @staticmethod
     def execute_multislice(
-        remote_fn: RemoteFunction,
+        remote_fn: RemoteFunction | Callable,
         accelerator_config: AcceleratorConfigType,
         flatten: bool = True,
+        *,
+        _fn_args: tuple = (),
         **kwargs,
     ) -> JobStatus:
         """Execute a Ray remote function across multiple TPU slices.
@@ -359,7 +383,7 @@ class RayExecutor:
                 TPU_POD_COUNT=str(len(members)),
             )
             if accelerator_config.execution_env:
-                base_env.update({str(k): str(v) for k, v in accelerator_config.execution_env.items() if v is not None})
+                base_env.update(_extract_runtime_env_vars(accelerator_config.execution_env))
 
             per_slice_futures = []
             for slice_id, member in enumerate(members):
@@ -384,7 +408,7 @@ class RayExecutor:
                     host_futures.append(
                         handle.run_remote_fn.remote(
                             remote_fn,
-                            f_args=(),
+                            f_args=_fn_args,
                             f_kwargs=kwargs,
                             runtime_env=accelerator_config.execution_env,
                             env=env_for_host,
@@ -439,10 +463,12 @@ class RayExecutor:
     @classmethod
     def execute_resumable(
         cls,
-        remote_fn: RemoteFunction,
+        remote_fn: RemoteFunction | Callable,
         accelerator_config: AcceleratorConfigType,
         max_retries_preemption: int = int(1e6),
         max_retries_failure: int = 10,
+        *,
+        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a remote function with automatic retry on failures.
@@ -506,7 +532,7 @@ class RayExecutor:
             attempt += 1
             problem = None
             try:
-                out = cls.execute(remote_fn=remote_fn, accelerator_config=accelerator_config, **kwargs)
+                out = cls.execute(remote_fn, accelerator_config, _fn_args=_fn_args, **kwargs)
             except ray.exceptions.RayTaskError as e:
                 problem = e
                 if "preempted" in str(e).lower():
@@ -521,7 +547,7 @@ class RayExecutor:
                 num_failures += 1
                 if num_failures >= max_retries_failure:
                     logger.exception("Failed too many times", exc_info=e)
-                    raise e
+                    raise
                 else:
                     logger.warning(f"Failed {num_failures} times", exc_info=e)
                     continue
@@ -556,10 +582,12 @@ class RayExecutor:
     @classmethod
     def execute_multislice_resumable(
         cls,
-        remote_fn: RemoteFunction,
+        remote_fn: RemoteFunction | Callable,
         accelerator_config: AcceleratorConfigType,
         max_retries_preemption: int = int(1e6),
         max_retries_failure: int = 10,
+        *,
+        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a multi-slice function with automatic retry on failures.
@@ -645,7 +673,7 @@ class RayExecutor:
             job_status: JobStatus | None = None
 
             try:
-                job_status = cls.execute_multislice(remote_fn=remote_fn, accelerator_config=accelerator_config, **kwargs)
+                job_status = cls.execute_multislice(remote_fn, accelerator_config, _fn_args=_fn_args, **kwargs)
 
             except ray.exceptions.RayTaskError as e:
                 problem = e
@@ -786,14 +814,10 @@ def execute_resumable(accelerator_config: AcceleratorConfigType):
         >>> result = my_task(input_data)
     """
 
-    def decorator(remote_fn: RemoteFunction):
+    def decorator(remote_fn: RemoteFunction | Callable):
         @functools.wraps(remote_fn)
-        def wrapper(**kwargs):
-            return RayExecutor.execute_resumable(
-                remote_fn=remote_fn,
-                accelerator_config=accelerator_config,
-                **kwargs,
-            )
+        def wrapper(*args, **kwargs):
+            return RayExecutor.execute_resumable(remote_fn, accelerator_config, _fn_args=args, **kwargs)
 
         return wrapper
 
@@ -833,14 +857,10 @@ def execute(accelerator_config: AcceleratorConfigType):
         >>> result = gpu_task(my_tensor)
     """
 
-    def decorator(remote_fn: RemoteFunction):
+    def decorator(remote_fn: RemoteFunction | Callable):
         @functools.wraps(remote_fn)
-        def wrapper(**kwargs):
-            return RayExecutor.execute(
-                remote_fn=remote_fn,
-                accelerator_config=accelerator_config,
-                **kwargs,
-            )
+        def wrapper(*args, **kwargs):
+            return RayExecutor.execute(remote_fn, accelerator_config, _fn_args=args, **kwargs)
 
         return wrapper
 
@@ -879,14 +899,10 @@ def execute_multislice(accelerator_config: AcceleratorConfigType):
         >>> results = parallel_compute(sharded_data)
     """
 
-    def decorator(remote_fn: RemoteFunction):
+    def decorator(remote_fn: RemoteFunction | Callable):
         @functools.wraps(remote_fn)
-        def wrapper(**kwargs):
-            return RayExecutor.execute_multislice(
-                remote_fn=remote_fn,
-                accelerator_config=accelerator_config,
-                **kwargs,
-            )
+        def wrapper(*args, **kwargs):
+            return RayExecutor.execute_multislice(remote_fn, accelerator_config, _fn_args=args, **kwargs)
 
         return wrapper
 
@@ -926,14 +942,10 @@ def execute_multislice_resumable(accelerator_config: AcceleratorConfigType):
         >>> results = resilient_training(training_data)
     """
 
-    def decorator(remote_fn: RemoteFunction):
+    def decorator(remote_fn: RemoteFunction | Callable):
         @functools.wraps(remote_fn)
-        def wrapper(**kwargs):
-            return RayExecutor.execute_multislice_resumable(
-                remote_fn=remote_fn,
-                accelerator_config=accelerator_config,
-                **kwargs,
-            )
+        def wrapper(*args, **kwargs):
+            return RayExecutor.execute_multislice_resumable(remote_fn, accelerator_config, _fn_args=args, **kwargs)
 
         return wrapper
 

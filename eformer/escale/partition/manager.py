@@ -93,9 +93,7 @@ def hash_fn(self) -> int:
     """Compute a hash value using dataclass fields (or object dict fallback)."""
     if dataclasses.is_dataclass(self):
         payload = tuple(
-            (field.name, _to_hashable(getattr(self, field.name)))
-            for field in dataclasses.fields(self)
-            if field.compare
+            (field.name, _to_hashable(getattr(self, field.name))) for field in dataclasses.fields(self) if field.compare
         )
         return hash((self.__class__.__qualname__, payload))
 
@@ -291,9 +289,7 @@ class PartitionAxis(xTree):
             is_existing_builtin = name in cls._SEMANTIC_MAP
             is_existing_custom = name in cls._REGISTERED_SEMANTIC_MAP
             if not override and (is_existing_builtin or is_existing_custom):
-                raise ValueError(
-                    f"Semantic axis '{name}' already exists. Use override=True to replace it."
-                )
+                raise ValueError(f"Semantic axis '{name}' already exists. Use override=True to replace it.")
 
             cls._REGISTERED_SEMANTIC_MAP[name] = axis_rule
             if generation_axis_rule is NOT_GIVEN:
@@ -792,8 +788,7 @@ def apply_logical_sharding(
         resolved_manager = get_current_partition_manager() or get_partition_manager()
     if resolved_manager is None:
         raise ValueError(
-            "No PartitionManager is available. "
-            "Provide `partition_manager` or use `with PartitionManager(...)`."
+            "No PartitionManager is available. Provide `partition_manager` or use `with PartitionManager(...)`."
         )
 
     return resolved_manager.shard(
