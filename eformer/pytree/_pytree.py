@@ -19,7 +19,7 @@ import dataclasses
 import json
 import types
 import typing as tp
-from functools import lru_cache, wraps
+from functools import lru_cache
 
 import typing_extensions
 from jax import tree_util as tu
@@ -287,8 +287,17 @@ def auto_pytree(
 
             cls_inner.from_dict = from_dict
 
+            class _PyTreeEncoder(json.JSONEncoder):
+                """JSON encoder that handles PyTree objects with to_dict()."""
+
+                def default(self, obj):
+                    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+                        return obj.to_dict()
+                    return super().default(obj)
+
             def to_json(self, **kwargs) -> str:
                 """Serializes the PyTree object to a JSON string."""
+                kwargs.setdefault("cls", _PyTreeEncoder)
                 return json.dumps(self.to_dict(), **kwargs)
 
             cls_inner.to_json = to_json
@@ -300,19 +309,6 @@ def auto_pytree(
                 return cls_inner_classmethod.from_dict(data)
 
             cls_inner.from_json = from_json
-
-            if not hasattr(json.JSONEncoder, "_pytree_patched"):
-                original_default = json.JSONEncoder.default
-
-                @wraps(original_default)
-                def json_default(encoder_self, obj):
-                    """JSON encoder default method patched to handle PyTrees."""
-                    if hasattr(obj, "to_dict") and callable(obj.to_dict):
-                        return obj.to_dict()
-                    return original_default(encoder_self, obj)
-
-                json.JSONEncoder.default = json_default
-                json.JSONEncoder._pytree_patched = True
 
         return tu.register_dataclass(
             cls_inner,

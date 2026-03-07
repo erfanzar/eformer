@@ -370,7 +370,7 @@ class Checkpointer:
             )
         if true_callbacks is not None:
             for save_callback in true_callbacks:
-                save_callback(destination, mesh, dict)
+                save_callback(destination, mesh, {"step": step, "is_temporary": not save_permanent, **(extras or {})})
             callback()
 
     def save_checkpoint(
@@ -1082,10 +1082,14 @@ def find_latest_checkpoint(base_path: str) -> str | None:
         return None
 
     def sort_key(path: str):
-        meta = json.load(fs.open(fsspec_utils.join_path(path, "metadata.json")))
-        ts = dt.datetime.fromisoformat(meta.get("timestamp"))
-        step = int(meta.get("step", -1))
-        return (ts, step)
+        try:
+            meta = json.load(fs.open(fsspec_utils.join_path(path, "metadata.json")))
+            ts = dt.datetime.fromisoformat(meta.get("timestamp", "1970-01-01T00:00:00"))
+            step = int(meta.get("step", -1))
+            return (ts, step)
+        except Exception as e:
+            logger.debug(f"Could not read metadata for {path}: {e}")
+            return (dt.datetime.min, -1)
 
     best = max(ckpts, key=sort_key)
     scheme = fsspec.core.split_protocol(base_path)[0] or ""

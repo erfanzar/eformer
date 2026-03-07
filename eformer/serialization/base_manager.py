@@ -534,7 +534,6 @@ class CheckpointManager:
                 index_data = {"metadata": metadata or {}, "weight_map": weight_map}
                 if cls._is_gcs_path(path_str):
                     gcs_client = cls.create_gcs_client()
-                    _ = cls._parse_gcs_path(base_prefix + ".txt")
                     idx_bucket, idx_blob = cls._parse_gcs_path(cls._index_filename(base_prefix))
                     bucket = gcs_client.bucket(idx_bucket)
                     blob = bucket.blob(idx_blob)

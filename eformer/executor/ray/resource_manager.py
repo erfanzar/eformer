@@ -203,7 +203,7 @@ class RayResources:
     @staticmethod
     def fork_disabled() -> bool:
         """Return whether subprocess isolation is disabled via environment."""
-        return os.getenv("EFORMER_DISABLE_FORK", "1").strip().lower() in {"1", "yes", "on", "true"}
+        return os.getenv("EFORMER_DISABLE_FORK", "0").strip().lower() in {"1", "yes", "on", "true"}
 
     @staticmethod
     def forkify_remote_fn(remote_fn: RemoteFunction | Callable):

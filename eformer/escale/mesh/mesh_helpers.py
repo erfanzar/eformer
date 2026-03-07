@@ -208,7 +208,6 @@ class MeshPartitionHelper:
                     spec[0] = method_tuple
                     break
 
-        print(spec)
         if all(s is None for s in spec):
             for method_tuple in methods:
                 if len(method_tuple) == 1:

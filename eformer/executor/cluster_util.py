@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 from dataclasses import dataclass
 
 import jax
@@ -136,7 +137,6 @@ class eSlurmCluster(clusters.SlurmCluster):
                 f"Number of visible devices ({len(all_visible_devices)}) is not divisible by the number "
                 f"of local tasks ({local_process_count})"
             )
-            return None
 
         num_devices_per_local_process = len(all_visible_devices) // local_process_count
 
@@ -398,16 +398,25 @@ def auto_ray_cluster(
                     if _is_this_machine(host):
                         logger.info(f"Starting ray head on port {ray_port}. We are process the coordinator {host}.")
                         logger.info(f"Starting ray head with num_cpus set to {num_cpus}.")
-                        ret = os.system(
-                            f"ray start --head --port {ray_port} --num-cpus {num_cpus} --dashboard-host=0.0.0.0"
-                        )
+                        ret = subprocess.run(
+                            [
+                                "ray",
+                                "start",
+                                "--head",
+                                "--port",
+                                str(ray_port),
+                                "--num-cpus",
+                                str(num_cpus),
+                                "--dashboard-host=0.0.0.0",
+                            ],
+                        ).returncode
                         if ret != 0:
                             if not fail_if_cluster_already_initialized:
                                 logger.warning(
                                     f"Failed to start ray head with exit code {ret}. Checking if we can connect to"
                                     " the head..."
                                 )
-                                ret = os.system("ray status")
+                                ret = subprocess.run(["ray", "status"]).returncode
                                 if ret != 0:
                                     raise RuntimeError(f"Failed to start ray head with exit code {ret}")
                                 else:
@@ -417,13 +426,21 @@ def auto_ray_cluster(
                         else:
                             logger.info(f"Successfully started ray head on port {ray_port}.")
 
-                        atexit.register(lambda: os.system("ray stop -g 10 --force &> /dev/null"))
+                        atexit.register(
+                            lambda: subprocess.run(
+                                ["ray", "stop", "-g", "10", "--force"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                        )
                     elif start_workers:
                         logger.info(
                             f"Starting ray worker and connecting to {address}. We are process {jax.process_index()}."
                         )
                         logger.info(f"Starting ray worker with num_cpus set to {num_cpus}.")
-                        ret = os.system(f"ray start --address {address} --num-cpus {num_cpus}")
+                        ret = subprocess.run(
+                            ["ray", "start", "--address", address, "--num-cpus", str(num_cpus)],
+                        ).returncode
                         if ret != 0:
                             raise RuntimeError(f"Failed to start ray head with exit code {ret}")
                         else:

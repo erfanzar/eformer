@@ -14,8 +14,12 @@
 
 """Additional API and edge-case tests for partition manager helpers."""
 
+import threading
+
+import jax
+import numpy as np
 import pytest
-from jax.sharding import PartitionSpec
+from jax.sharding import Mesh, PartitionSpec
 
 from eformer.common_types import (
     BATCH,
@@ -32,6 +36,7 @@ from eformer.escale.partition import (
     get_current_partition_manager,
     get_partition_manager,
 )
+from eformer.escale.partition.auto_spec import auto_partition_spec
 from eformer.escale.partition.manager import get_safe_hash_int
 
 
@@ -173,6 +178,20 @@ def test_last_partition_manager_tracks_last_created_instance():
     assert get_partition_manager() is not first
 
 
+def test_last_partition_manager_is_visible_from_other_threads():
+    manager = PartitionManager(PartitionAxis(data_parallel_axis="dp"))
+    seen = []
+
+    def worker():
+        seen.append(get_partition_manager())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert seen == [manager]
+
+
 def test_resolve_requires_shape_for_integer_mode_dynamic_axes():
     manager = PartitionManager(PartitionAxis())
     with pytest.raises(ValueError, match="shape should be provided"):
@@ -195,3 +214,10 @@ def test_apply_logical_sharding_with_none_manager_falls_back(monkeypatch):
         mode=MODE_TRAIN,
     )
     assert output == "fallback-called"
+
+
+def test_auto_partition_spec_deduplicates_repeated_names():
+    mesh = Mesh(np.array(jax.devices()[:1]), ("dp",))
+    spec = auto_partition_spec(np.ones((8, 8)), mesh=mesh, names=["dp", "dp"], min_sharding_size=1)
+
+    assert spec == PartitionSpec("dp", None)

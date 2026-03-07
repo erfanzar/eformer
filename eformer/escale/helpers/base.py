@@ -14,6 +14,7 @@
 
 
 import abc
+import threading
 import time
 import typing as tp
 import warnings
@@ -26,6 +27,7 @@ from jax.sharding import Mesh, PartitionSpec
 from ..partition import get_incontext_mesh
 
 _sync_counter = 0
+_sync_counter_lock = threading.Lock()
 
 
 class ShardingRule(abc.ABC):
@@ -631,5 +633,7 @@ def barrier_sync(timeout: float = 200):
     if client is None:
         raise RuntimeError("barrier_sync requires jax distributed client to be initialized")
 
-    _sync_counter += 1
-    client.wait_at_barrier(f"easy_barrier_sync_{_sync_counter}", timeout_in_ms=int(timeout * 1000.0))
+    with _sync_counter_lock:
+        _sync_counter += 1
+        counter = _sync_counter
+    client.wait_at_barrier(f"easy_barrier_sync_{counter}", timeout_in_ms=int(timeout * 1000.0))

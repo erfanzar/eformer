@@ -337,7 +337,7 @@ def with_sharding_constraint(arr: jnp.ndarray | tp.Any, sharding: PartitionSpec 
             sharded_leaves = [apply_to_leaf(leaf) for leaf in leaves]
             return jax.tree_util.tree_unflatten(tree_def, sharded_leaves)
 
-    except Exception:
+    except (ValueError, TypeError):
         return _apply_sharding_to_array(arr)
 
 

@@ -1088,7 +1088,7 @@ def tree_apply(fns: FnDict, tree: TreeDict) -> TreeDict:  # type:ignore
     return jax.tree_util.tree_map(lambda fn, x: fn(x), fns, tree)
 
 
-def tree_path_to_string(path: Path, sep: str | None = None) -> str:  # type:ignore
+def tree_path_to_string(path: Path, sep: str | None = None) -> str | tuple[str, ...]:  # type:ignore
     """
     Convert a JAX tree path to a string representation.
 

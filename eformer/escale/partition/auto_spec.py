@@ -69,7 +69,7 @@ def auto_partition_spec(
     dim_indices = np.argsort([-dim if not reverse else dim for dim in x.shape])
 
     partition_spec = [None] * len(x.shape)
-    remaining_names = set(names)
+    remaining_names = list(dict.fromkeys(names))
 
     for dim_idx in dim_indices:
         dim_size = x.shape[dim_idx]
@@ -258,7 +258,7 @@ def optimize_sharding_for_memory(
 
     def get_optimal_spec(name: str, array: chex.Array) -> PartitionSpec:
         array_size = np.prod(array.shape) * array.dtype.itemsize
-        if array_size < max_memory_per_device:
+        if max_memory_per_device is None or array_size < max_memory_per_device:
             return PartitionSpec()
 
         return auto_partition_spec(array, mesh=mesh, names=names, min_sharding_size=None)

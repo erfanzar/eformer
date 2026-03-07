@@ -675,7 +675,7 @@ class IPManager:
         logger = logging.getLogger(__name__)
 
         try:
-            hostname_output = subprocess.check_output("hostname -I", shell=True).decode().strip()
+            hostname_output = subprocess.check_output(["hostname", "-I"]).decode().strip()
             ip = hostname_output.split()[0]
             logger.debug(f"Retrieved local IP: {ip}")
             return ip
