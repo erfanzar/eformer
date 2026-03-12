@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,9 +57,9 @@ Example:
 
     Multi-slice execution with decorator:
 
-    >>> from eformer.executor.ray import execute_multislice_resumable
+    >>> from eformer.executor.ray import autoscale_execute_resumable
     >>>
-    >>> @execute_multislice_resumable(tpu_config)
+    >>> @autoscale_execute_resumable(tpu_config)
     >>> @ray.remote
     >>> def distributed_train(slice_data):
     ...
@@ -73,8 +73,8 @@ Classes:
 Functions:
     execute: Decorator for single-pod execution without retry
     execute_resumable: Decorator for single-pod execution with retry
-    execute_multislice: Decorator for multi-slice execution without retry
-    execute_multislice_resumable: Decorator for multi-slice execution with retry
+    autoscale_execute: Decorator for multi-slice execution without retry
+    autoscale_execute_resumable: Decorator for multi-slice execution with retry
 """
 
 import functools
@@ -137,18 +137,6 @@ def resolve_maybe_refs(items):
     return items
 
 
-def _extract_runtime_env_vars(runtime_env) -> dict[str, str]:
-    """Extract only process environment variables from a Ray runtime_env."""
-    if not runtime_env:
-        return {}
-
-    env_vars = runtime_env.get("env_vars", {}) if hasattr(runtime_env, "get") else {}
-    if not isinstance(env_vars, dict):
-        return {}
-
-    return {str(k): str(v) for k, v in env_vars.items() if v is not None}
-
-
 class RayExecutor:
     """Core executor for Ray-based distributed workloads.
 
@@ -162,9 +150,9 @@ class RayExecutor:
 
     Methods:
         execute: Single-pod execution without retry
-        execute_multislice: Multi-slice execution without retry
+        autoscale_execute: Multi-slice execution without retry
         execute_resumable: Single-pod execution with automatic retry
-        execute_multislice_resumable: Multi-slice execution with automatic retry
+        autoscale_execute_resumable: Multi-slice execution with automatic retry
 
     All methods return JobStatus objects that encapsulate:
         - JobSucceeded: Successful completion with results
@@ -179,17 +167,15 @@ class RayExecutor:
 
     @staticmethod
     def execute(
-        remote_fn: RemoteFunction | Callable,
+        remote_fn: RemoteFunction,
         accelerator_config: AcceleratorConfigType,
-        *args,
-        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a Ray remote function on a single pod or slice.
 
         Runs a Ray remote function on a single accelerator pod (TPU/GPU)
         with the specified resource configuration. For multi-slice TPU
-        workloads, use execute_multislice instead.
+        workloads, use autoscale_execute instead.
 
         Args:
             remote_fn (RemoteFunction): The Ray remote function to execute.
@@ -203,7 +189,7 @@ class RayExecutor:
 
         Raises:
             ValueError: If pod_count in accelerator_config is not 1,
-                indicating that execute_multislice should be used instead.
+                indicating that autoscale_execute should be used instead.
 
         Example:
             >>> @ray.remote
@@ -213,18 +199,12 @@ class RayExecutor:
             >>> config = GpuAcceleratorConfig(count=1, type="v100")
             >>> result = RayExecutor.execute(compute, config, x=10)
         """
-        if args and _fn_args:
-            raise TypeError("Pass positional remote-function arguments via either *args or _fn_args, not both.")
-
-        call_args = _fn_args or args
-
         if getattr(accelerator_config, "pod_count", 1) != 1:
-            raise ValueError("Multi-slice workloads on TPUs should use 'execute_multislice'.")
+            raise ValueError("Multi-slice workloads on TPUs should use 'autoscale_execute'.")
 
         def do_run(
             remote_fn,
             accelerator_config: AcceleratorConfigType,
-            args,
             kwargs,
         ) -> JobStatus:
             """Internal function to run the remote function with proper resource allocation.
@@ -255,7 +235,7 @@ class RayExecutor:
                     remote_fn=remote_fn,
                     env_vars={ENV_CALL_INDEX: str(idx)},
                 )
-                futures.append(_call.remote(*args, **kwargs))
+                futures.append(_call.remote(**kwargs))
             try:
                 out = ray.get(futures)
                 return JobSucceeded(info, out)
@@ -269,20 +249,16 @@ class RayExecutor:
         if accelerator_config.head_name is None and not isinstance(accelerator_config, TpuAcceleratorConfig):
             do_run = ray.remote(do_run)
         else:
-            head_name = accelerator_config.head_name
-            if head_name is None and isinstance(accelerator_config, TpuAcceleratorConfig):
-                head_name = f"TPU-{accelerator_config.tpu_version}-head"
-            resources = {head_name: accelerator_config.head_workers} if head_name else {}
+            default_name = f"TPU-{accelerator_config.tpu_version}-head"
+            resources = {accelerator_config.head_name or default_name: accelerator_config.head_workers}
             do_run = ray.remote(resources=resources)(do_run)
-        return ray.get(do_run.remote(remote_fn, accelerator_config, call_args, kwargs))
+        return ray.get(do_run.remote(remote_fn, accelerator_config, kwargs))
 
     @staticmethod
-    def execute_multislice(
-        remote_fn: RemoteFunction | Callable,
+    def autoscale_execute(
+        remote_fn: RemoteFunction,
         accelerator_config: AcceleratorConfigType,
         flatten: bool = True,
-        *,
-        _fn_args: tuple = (),
         **kwargs,
     ) -> JobStatus:
         """Execute a Ray remote function across multiple TPU slices.
@@ -339,7 +315,7 @@ class RayExecutor:
             >>> tpu_config = TpuAcceleratorConfig(type="v4-32", pod_count=4)
             >>>
             >>>
-            >>> job_status = RayExecutor.execute_multislice(
+            >>> job_status = RayExecutor.autoscale_execute(
             ...     train_on_slice,
             ...     tpu_config,
             ...     data=training_data
@@ -348,7 +324,7 @@ class RayExecutor:
             ...     flat_results = job_status.result
             >>>
             >>>
-            >>> job_status = RayExecutor.execute_multislice(
+            >>> job_status = RayExecutor.autoscale_execute(
             ...     train_on_slice,
             ...     tpu_config,
             ...     flatten=False,
@@ -383,7 +359,7 @@ class RayExecutor:
                 TPU_POD_COUNT=str(len(members)),
             )
             if accelerator_config.execution_env:
-                base_env.update(_extract_runtime_env_vars(accelerator_config.execution_env))
+                base_env.update({str(k): str(v) for k, v in accelerator_config.execution_env.items() if v is not None})
 
             per_slice_futures = []
             for slice_id, member in enumerate(members):
@@ -408,7 +384,7 @@ class RayExecutor:
                     host_futures.append(
                         handle.run_remote_fn.remote(
                             remote_fn,
-                            f_args=_fn_args,
+                            f_args=(),
                             f_kwargs=kwargs,
                             runtime_env=accelerator_config.execution_env,
                             env=env_for_host,
@@ -463,12 +439,10 @@ class RayExecutor:
     @classmethod
     def execute_resumable(
         cls,
-        remote_fn: RemoteFunction | Callable,
+        remote_fn: RemoteFunction,
         accelerator_config: AcceleratorConfigType,
         max_retries_preemption: int = int(1e6),
         max_retries_failure: int = 10,
-        *,
-        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a remote function with automatic retry on failures.
@@ -532,7 +506,7 @@ class RayExecutor:
             attempt += 1
             problem = None
             try:
-                out = cls.execute(remote_fn, accelerator_config, _fn_args=_fn_args, **kwargs)
+                out = cls.execute(remote_fn=remote_fn, accelerator_config=accelerator_config, **kwargs)
             except ray.exceptions.RayTaskError as e:
                 problem = e
                 if "preempted" in str(e).lower():
@@ -547,7 +521,7 @@ class RayExecutor:
                 num_failures += 1
                 if num_failures >= max_retries_failure:
                     logger.exception("Failed too many times", exc_info=e)
-                    raise
+                    raise e
                 else:
                     logger.warning(f"Failed {num_failures} times", exc_info=e)
                     continue
@@ -580,14 +554,12 @@ class RayExecutor:
             raise RuntimeError("Failed too many times") from problem
 
     @classmethod
-    def execute_multislice_resumable(
+    def autoscale_execute_resumable(
         cls,
-        remote_fn: RemoteFunction | Callable,
+        remote_fn: RemoteFunction,
         accelerator_config: AcceleratorConfigType,
         max_retries_preemption: int = int(1e6),
         max_retries_failure: int = 10,
-        *,
-        _fn_args: tuple = (),
         **kwargs,
     ):
         """Execute a multi-slice function with automatic retry on failures.
@@ -618,8 +590,8 @@ class RayExecutor:
         Raises:
             RuntimeError: If any slice is preempted more than max_retries_preemption
                 times, fails more than max_retries_failure times, or if
-                execute_multislice returns None or unexpected result type.
-            RayError: If execute_multislice fails during setup or coordination
+                autoscale_execute returns None or unexpected result type.
+            RayError: If autoscale_execute fails during setup or coordination
                 (slice actor creation, placement group setup, etc.).
             ray.exceptions.RayTaskError: Re-raised if it occurs and indicates
                 preemption or failure after max retries.
@@ -643,7 +615,7 @@ class RayExecutor:
             >>> tpu_config = TpuAcceleratorConfig(type="v4-32", pod_count=4)
             >>>
             >>>
-            >>> results = RayExecutor.execute_multislice_resumable(
+            >>> results = RayExecutor.autoscale_execute_resumable(
             ...     distributed_training,
             ...     tpu_config,
             ...     max_retries_preemption=50,
@@ -652,7 +624,7 @@ class RayExecutor:
             ... )
             >>>
             >>>
-            >>> results_by_slice = RayExecutor.execute_multislice_resumable(
+            >>> results_by_slice = RayExecutor.autoscale_execute_resumable(
             ...     distributed_training,
             ...     tpu_config,
             ...     max_retries_preemption=50,
@@ -673,7 +645,7 @@ class RayExecutor:
             job_status: JobStatus | None = None
 
             try:
-                job_status = cls.execute_multislice(remote_fn, accelerator_config, _fn_args=_fn_args, **kwargs)
+                job_status = cls.autoscale_execute(remote_fn=remote_fn, accelerator_config=accelerator_config, **kwargs)
 
             except ray.exceptions.RayTaskError as e:
                 problem = e
@@ -728,9 +700,9 @@ class RayExecutor:
                     continue
 
             if not job_status:
-                logger.warning("execute_multislice returned None. Treating as failure.")
+                logger.warning("autoscale_execute returned None. Treating as failure.")
                 num_failures += 1
-                problem = problem or RuntimeError("No job status from execute_multislice")
+                problem = problem or RuntimeError("No job status from autoscale_execute")
                 continue
 
             if isinstance(job_status, JobSucceeded):
@@ -761,7 +733,7 @@ class RayExecutor:
                 )
                 continue
             else:
-                err_msg = f"Unexpected result type {type(job_status)} from execute_multislice: {job_status}"
+                err_msg = f"Unexpected result type {type(job_status)} from autoscale_execute: {job_status}"
                 problem = RuntimeError(err_msg)
                 num_failures += 1
                 logger.error(err_msg)
@@ -778,8 +750,8 @@ class RayExecutor:
             "Exhausted retries for multislice execution without explicit success or reaching failure/preemption limits."
         ) from problem
 
-    autoscale_execute = execute_multislice
-    autoscale_execute_resumable = execute_multislice_resumable
+    autoscale_execute = autoscale_execute
+    autoscale_execute_resumable = autoscale_execute_resumable
 
 
 def execute_resumable(accelerator_config: AcceleratorConfigType):
@@ -814,10 +786,14 @@ def execute_resumable(accelerator_config: AcceleratorConfigType):
         >>> result = my_task(input_data)
     """
 
-    def decorator(remote_fn: RemoteFunction | Callable):
+    def decorator(remote_fn: RemoteFunction):
         @functools.wraps(remote_fn)
-        def wrapper(*args, **kwargs):
-            return RayExecutor.execute_resumable(remote_fn, accelerator_config, _fn_args=args, **kwargs)
+        def wrapper(**kwargs):
+            return RayExecutor.execute_resumable(
+                remote_fn=remote_fn,
+                accelerator_config=accelerator_config,
+                **kwargs,
+            )
 
         return wrapper
 
@@ -857,20 +833,24 @@ def execute(accelerator_config: AcceleratorConfigType):
         >>> result = gpu_task(my_tensor)
     """
 
-    def decorator(remote_fn: RemoteFunction | Callable):
+    def decorator(remote_fn: RemoteFunction):
         @functools.wraps(remote_fn)
-        def wrapper(*args, **kwargs):
-            return RayExecutor.execute(remote_fn, accelerator_config, _fn_args=args, **kwargs)
+        def wrapper(**kwargs):
+            return RayExecutor.execute(
+                remote_fn=remote_fn,
+                accelerator_config=accelerator_config,
+                **kwargs,
+            )
 
         return wrapper
 
     return decorator
 
 
-def execute_multislice(accelerator_config: AcceleratorConfigType):
+def autoscale_execute(accelerator_config: AcceleratorConfigType):
     """Decorator for multi-slice execution without retry.
 
-    Wraps a Ray remote function to automatically use RayExecutor.execute_multislice
+    Wraps a Ray remote function to automatically use RayExecutor.autoscale_execute
     with the specified accelerator configuration. Results from all slices are
     automatically retrieved with ray.get(). The function will be executed
     across multiple TPU slices in parallel, with MegaScale coordination
@@ -891,7 +871,7 @@ def execute_multislice(accelerator_config: AcceleratorConfigType):
     Example:
         >>> tpu_config = TpuAcceleratorConfig(type="v4-32", pod_count=4)
         >>>
-        >>> @execute_multislice(tpu_config)
+        >>> @autoscale_execute(tpu_config)
         >>> @ray.remote
         >>> def parallel_compute(data_shard):
         ...     return compute_result(data_shard)
@@ -899,20 +879,24 @@ def execute_multislice(accelerator_config: AcceleratorConfigType):
         >>> results = parallel_compute(sharded_data)
     """
 
-    def decorator(remote_fn: RemoteFunction | Callable):
+    def decorator(remote_fn: RemoteFunction):
         @functools.wraps(remote_fn)
-        def wrapper(*args, **kwargs):
-            return RayExecutor.execute_multislice(remote_fn, accelerator_config, _fn_args=args, **kwargs)
+        def wrapper(**kwargs):
+            return RayExecutor.autoscale_execute(
+                remote_fn=remote_fn,
+                accelerator_config=accelerator_config,
+                **kwargs,
+            )
 
         return wrapper
 
     return decorator
 
 
-def execute_multislice_resumable(accelerator_config: AcceleratorConfigType):
+def autoscale_execute_resumable(accelerator_config: AcceleratorConfigType):
     """Decorator for fault-tolerant multi-slice execution.
 
-    Wraps a Ray remote function to automatically use RayExecutor.execute_multislice_resumable
+    Wraps a Ray remote function to automatically use RayExecutor.autoscale_execute_resumable
     with the specified accelerator configuration. Provides automatic retry on
     preemption or failure of any slice. Uses an all-or-nothing retry policy:
     if any slice fails, the entire multi-slice execution is retried.
@@ -927,13 +911,13 @@ def execute_multislice_resumable(accelerator_config: AcceleratorConfigType):
 
     Note:
         Default retry limits are 1,000,000 for preemptions and 10 for failures.
-        To customize these limits, use RayExecutor.execute_multislice_resumable
+        To customize these limits, use RayExecutor.autoscale_execute_resumable
         directly with max_retries_preemption and max_retries_failure parameters.
 
     Example:
         >>> tpu_config = TpuAcceleratorConfig(type="v4-32", pod_count=4, preemptible=True)
         >>>
-        >>> @execute_multislice_resumable(tpu_config)
+        >>> @autoscale_execute_resumable(tpu_config)
         >>> @ray.remote
         >>> def resilient_training(data_batch):
         ...
@@ -942,10 +926,14 @@ def execute_multislice_resumable(accelerator_config: AcceleratorConfigType):
         >>> results = resilient_training(training_data)
     """
 
-    def decorator(remote_fn: RemoteFunction | Callable):
+    def decorator(remote_fn: RemoteFunction):
         @functools.wraps(remote_fn)
-        def wrapper(*args, **kwargs):
-            return RayExecutor.execute_multislice_resumable(remote_fn, accelerator_config, _fn_args=args, **kwargs)
+        def wrapper(**kwargs):
+            return RayExecutor.autoscale_execute_resumable(
+                remote_fn=remote_fn,
+                accelerator_config=accelerator_config,
+                **kwargs,
+            )
 
         return wrapper
 
@@ -1475,7 +1463,3 @@ def device_remote(*, accelerator_config: TpuAcceleratorConfig, flatten: bool = T
             raise TypeError("tpu_remote can only decorate a function or a class.")
 
     return decorator
-
-
-autoscale_execute = execute_multislice
-autoscale_execute_resumable = execute_multislice_resumable

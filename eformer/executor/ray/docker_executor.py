@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import ray
+from ray.remote_function import RemoteFunction
 
 from .executor import RayExecutor
 from .resource_manager import AcceleratorConfigType
@@ -103,8 +104,8 @@ class DockerConfig:
 
     image: str
     command: str | list[str]
-    volumes: dict[str, str] | None = None
-    environment: dict[str, str] | None = None
+    volumes: dict[str, str] = None
+    environment: dict[str, str] = None
     network: str = "host"
     privileged: bool = False
     gpus: str | None = None
@@ -172,34 +173,6 @@ def make_docker_run_command(config: DockerConfig) -> list[str]:
     return cmd
 
 
-def _normalize_docker_results(results: Any, capture_output: bool) -> Any:
-    """Validate docker execution results and preserve single-worker ergonomics."""
-    if isinstance(results, tuple):
-        result_items = [results]
-    elif isinstance(results, list):
-        result_items = results
-    else:
-        raise RuntimeError(f"Unexpected docker result payload: {results!r}")
-
-    outputs = []
-    for index, result in enumerate(result_items):
-        try:
-            returncode, stdout, stderr = result
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Unexpected docker result at worker index {index}: {result!r}") from exc
-
-        if returncode != 0:
-            logger.error(f"Docker container on worker {index} failed with exit code {returncode}")
-            logger.error(f"stderr: {stderr}")
-            raise RuntimeError(f"Docker container on worker {index} failed: {stderr}")
-
-        outputs.append(stdout if capture_output else None)
-
-    if len(outputs) == 1:
-        return outputs[0]
-    return outputs
-
-
 def run_docker_on_pod(
     docker_config: DockerConfig,
     accelerator_config: AcceleratorConfigType,
@@ -260,7 +233,8 @@ def run_docker_on_pod(
             result = subprocess.run(cmd, check=False)
             return result.returncode, "", ""
 
-    run_docker = ray.remote(run_docker)
+    if not isinstance(run_docker, RemoteFunction):
+        run_docker = ray.remote(run_docker)
 
     result = RayExecutor.execute_resumable(
         remote_fn=run_docker,
@@ -268,7 +242,14 @@ def run_docker_on_pod(
         **executor_kwargs,
     )
 
-    return _normalize_docker_results(result, capture_output=capture_output)
+    returncode, stdout, stderr = result
+
+    if returncode != 0:
+        logger.error(f"Docker container failed with exit code {returncode}")
+        logger.error(f"stderr: {stderr}")
+        raise RuntimeError(f"Docker container failed: {stderr}")
+
+    return stdout if capture_output else None
 
 
 def run_docker_multislice(
@@ -291,7 +272,7 @@ def run_docker_multislice(
         capture_output (bool): Whether to capture and return container output.
             Defaults to True.
         **executor_kwargs: Additional arguments passed to
-            RayExecutor.execute_multislice_resumable().
+            RayExecutor.autoscale_execute_resumable().
 
     Returns:
         list[Any]: List of outputs from each host's Docker container.
@@ -352,9 +333,10 @@ def run_docker_multislice(
             result = subprocess.run(cmd, check=False)
             return result.returncode, "", ""
 
-    run_docker_with_slice_env = ray.remote(run_docker_with_slice_env)
+    if not isinstance(run_docker_with_slice_env, RemoteFunction):
+        run_docker_with_slice_env = ray.remote(run_docker_with_slice_env)
 
-    results = RayExecutor.execute_multislice_resumable(
+    results = RayExecutor.autoscale_execute_resumable(
         remote_fn=run_docker_with_slice_env,
         accelerator_config=accelerator_config,
         **executor_kwargs,
@@ -423,7 +405,7 @@ def build_and_push_docker_image(
     build_cmd.extend(["-f", dockerfile_path, os.path.dirname(dockerfile_path)])
 
     logger.info(f"Building Docker image: {' '.join(build_cmd)}")
-    result = subprocess.run(build_cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(build_cmd, check=True, capture_output=True, text=True)
 
     if result.returncode != 0:
         raise RuntimeError(f"Docker build failed: {result.stderr}")
@@ -431,7 +413,7 @@ def build_and_push_docker_image(
     if registry:
         push_cmd = ["docker", "push", full_image_name]
         logger.info(f"Pushing Docker image: {' '.join(push_cmd)}")
-        result = subprocess.run(push_cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(push_cmd, check=True, capture_output=True, text=True)
 
         if result.returncode != 0:
             raise RuntimeError(f"Docker push failed: {result.stderr}")

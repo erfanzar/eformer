@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -79,27 +79,6 @@ SLICE_ACTOR_START_TIMEOUT_S = 4 * 60 * 60
 SCALE_POLL_S = int(os.getenv("EFORMER_SCALE_POLL_S", "30"))
 SCALE_ADD_TIMEOUT_S = int(os.getenv("EFORMER_SCALE_ADD_TIMEOUT_S", "604800"))
 ActorInfoT = TypeVar("ActorInfoT")
-
-
-def _check_gcp_preemption() -> bool:
-    """Check if this GCP instance is being preempted via metadata server."""
-    try:
-        r = requests.get(
-            "http://metadata.google.internal/computeMetadata/v1/instance/preempted",
-            headers={"Metadata-Flavor": "Google"},
-            timeout=1.0,
-        )
-        return r.status_code == 200 and r.text.strip().upper() == "TRUE"
-    except requests.RequestException:
-        return False
-
-
-def _safe_kill_actor(actor: ActorHandle) -> None:
-    """Best-effort kill of a Ray actor, suppressing errors."""
-    try:
-        ray.kill(actor, no_restart=True)
-    except Exception:
-        pass
 
 
 class InsufficientSlicesError(RuntimeError):
@@ -216,7 +195,7 @@ class ResourcePoolManager(Generic[ActorInfoT]):
         done, _ = ray.wait(refs, num_returns=len(refs), timeout=HEALTH_CHECK_TIMEOUT_S)
 
         done_set = set(done)
-        healthy: list[ActorPoolMember[ActorInfoT]] = []
+        healthy: list[ActorPoolMember[HostInfo]] = []
 
         for member, ref in ref_map.items():
             name = self.get_actor_name_from_actor_info(member.actor_info)
@@ -226,13 +205,22 @@ class ResourcePoolManager(Generic[ActorInfoT]):
                         healthy.append(member)
                     else:
                         logger.warning(f"Actor {name} reported unhealthy; killing")
-                        _safe_kill_actor(member.actor)
+                        try:
+                            ray.kill(member.actor, no_restart=True)
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.warning(f"Actor {name} health check exception ({e}); killing")
-                    _safe_kill_actor(member.actor)
+                    try:
+                        ray.kill(member.actor, no_restart=True)
+                    except Exception:
+                        pass
             else:
                 logger.warning(f"Actor {name} health timeout; killing")
-                _safe_kill_actor(member.actor)
+                try:
+                    ray.kill(member.actor, no_restart=True)
+                except Exception:
+                    pass
 
         self._actor_pool = healthy
 
@@ -266,7 +254,10 @@ class ResourcePoolManager(Generic[ActorInfoT]):
                 logger.info(f"Added actor {self.get_actor_name_from_actor_info(info)}")
             except Exception as e:
                 logger.warning(f"SliceActor failed to start in time: {e}; killing actor")
-                _safe_kill_actor(actor)
+                try:
+                    ray.kill(actor, no_restart=True)
+                except Exception:
+                    pass
 
         logger.info(f"Started {started}/{num_to_add} slice actors")
 
@@ -385,8 +376,23 @@ class DeviceHostActor:
         return not self._failed and not self.is_being_preempted()
 
     def is_being_preempted(self) -> bool:
-        """Check if this GCP instance is being preempted."""
-        return _check_gcp_preemption()
+        """Check if this GCP instance is being preempted.
+
+        Queries the GCP metadata server to determine if the instance
+        is scheduled for preemption.
+
+        Returns:
+            True if instance is being preempted, False otherwise.
+        """
+        try:
+            r = requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/preempted",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=1.0,
+            )
+            return r.status_code == 200 and r.text.strip().upper() == "TRUE"
+        except requests.RequestException:
+            return False
 
     def get_info(self) -> HostInfo:
         """Get current information about this host.
@@ -414,7 +420,7 @@ class DeviceHostActor:
         """
         import os
 
-        if os.getenv("EFORMER_KILL_VFIO", "0").strip().lower() not in {"1", "yes", "on", "true"}:
+        if os.getenv("EFORMER_KILL_VFIO", "1") != "1":
             return
         try:
             import shutil
@@ -461,12 +467,12 @@ class DeviceHostActor:
         Returns:
             Merged runtime environment dictionary.
         """
-        merged = dict(runtime_env or {})
+        re = dict(runtime_env or {})
         if env_vars:
-            ev = dict(merged.get("env_vars", {}))
+            ev = dict(re.get("env_vars", {}))
             ev.update({str(k): str(v) for k, v in env_vars.items() if v is not None})
-            merged["env_vars"] = ev
-        return merged
+            re["env_vars"] = ev
+        return re
 
     def _hacky_remove_tpu_lockfile(self):
         """Remove TPU lockfile that may prevent TPU initialization.
@@ -481,14 +487,7 @@ class DeviceHostActor:
             pass
         except PermissionError:
             try:
-                import subprocess
-
-                subprocess.run(
-                    ["sudo", "-n", "rm", "-f", "/tmp/libtpu_lockfile"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                os.system("sudo rm /tmp/libtpu_lockfile")
             except Exception:
                 pass
 
@@ -630,14 +629,16 @@ class DeviceHostActor:
 
 
 @ray.remote
-class SliceActor(ResourcePoolManager[HostInfo]):
+class SliceActor:
     """Ray actor for managing a TPU slice with multiple hosts.
 
-    Inherits pool management (health checks, scaling, draining) from
-    ResourcePoolManager and adds TPU-specific placement group coordination,
-    host discovery, and distributed task execution.
+    Coordinates multiple TPU hosts within a single slice, handling
+    placement groups, resource allocation, and distributed task execution.
+    Each SliceActor manages a complete TPU pod/slice and ensures hosts
+    are properly distributed across nodes using placement groups.
 
     Attributes:
+        _actor_pool: List of DeviceHostActor pool members for this slice.
         _failed: Whether this slice has failed or been preempted.
         _slice_info: Detailed information about the TPU slice configuration.
         _host_placement_group: Ray placement group for STRICT_SPREAD host distribution.
@@ -659,7 +660,7 @@ class SliceActor(ResourcePoolManager[HostInfo]):
         within a single slice. Discovers slice information from the
         TPU environment during initialization.
         """
-        super().__init__()
+        self._actor_pool: list[ActorPoolMember[HostInfo]] = []
         self._failed = False
         self._slice_info: SliceInfo | None = None
         self._host_placement_group = None
@@ -704,13 +705,14 @@ class SliceActor(ResourcePoolManager[HostInfo]):
             available_hosts = ray.cluster_resources().get(pod_name, None)
             if available_hosts is not None and num_hosts > available_hosts:
                 available_hosts = int(available_hosts)
-                fallback_devices = int(os.getenv("EFORMER_MODERATE_DEVICES_PER_HOST", str(num_devices or 4)))
-                logger.info(
+                num_devices = int(available_hosts)
+                real_num_devices = 4
+                print(
                     f"auto-discovered to set num_hosts from {num_hosts} to {available_hosts} and "
-                    f"num_devices to {fallback_devices}"
+                    f"num_devices from {num_devices} to {real_num_devices}"
                 )
                 num_hosts = available_hosts
-                num_devices = fallback_devices
+                num_devices = real_num_devices
         return {
             "ip": ray.util.get_node_ip_address(),
             "node_id": ray.get_runtime_context().get_node_id(),
@@ -772,15 +774,13 @@ class SliceActor(ResourcePoolManager[HostInfo]):
                 available_hosts = ray.cluster_resources().get(slice_name, None)
                 if available_hosts is not None and num_hosts > available_hosts:
                     available_hosts = int(available_hosts)
-                    fallback_accel = int(
-                        os.getenv("EFORMER_MODERATE_DEVICES_PER_HOST", str(num_accelerators_per_host or 4))
-                    )
-                    logger.info(
-                        f"setting num_hosts from {num_hosts} to {available_hosts} and "
-                        f"num_accelerators_per_host from {num_accelerators_per_host} to {fallback_accel}"
+                    real_accelerators_per_host = 4
+                    print(
+                        f"setting {num_hosts=} to {available_hosts=} and "
+                        f"{num_accelerators_per_host=} to {real_accelerators_per_host=}"
                     )
                     num_hosts = available_hosts
-                    num_accelerators_per_host = fallback_accel
+                    num_accelerators_per_host = real_accelerators_per_host
             ip_address = ray.util.get_node_ip_address()
 
             self._slice_info = SliceInfo(
@@ -809,8 +809,22 @@ class SliceActor(ResourcePoolManager[HostInfo]):
         return not self.is_being_preempted()
 
     def is_being_preempted(self) -> bool:
-        """Check if this GCP instance is being preempted."""
-        return _check_gcp_preemption()
+        """Check if this GCP instance is being preempted.
+
+        Queries GCP metadata server to determine preemption status.
+
+        Returns:
+            True if instance is being preempted, False otherwise.
+        """
+        try:
+            r = requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/instance/preempted",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=1.0,
+            )
+            return r.status_code == 200 and r.text.strip().upper() == "TRUE"
+        except requests.RequestException:
+            return False
 
     def get_info(self) -> SliceInfo:
         """Get current information about this slice.
@@ -825,6 +839,22 @@ class SliceActor(ResourcePoolManager[HostInfo]):
         if not self._slice_info:
             raise RuntimeError("Slice info not initialized")
         return self._slice_info
+
+    def get_all_actors_in_pool(self) -> list[ActorHandle]:
+        """Get all actor handles in the pool.
+
+        Returns:
+            List of Ray actor handles.
+        """
+        return [m.actor for m in self._actor_pool]
+
+    def get_all_pool_members(self) -> list[ActorPoolMember[HostInfo]]:
+        """Get a copy of all pool members with their metadata.
+
+        Returns:
+            List of ActorPoolMember objects containing actors and their info.
+        """
+        return self._actor_pool.copy()
 
     def get_actor_pool_name(self) -> str:
         """Get a human-readable name for this actor pool.
@@ -941,6 +971,50 @@ class SliceActor(ResourcePoolManager[HostInfo]):
         target = desired_hosts if desired_hosts is not None else self._slice_info.num_hosts
         self._scale_actor_pool(target)
 
+    def _remove_unhealthy_members_from_actor_pool(self) -> None:
+        """Remove unhealthy actors from the pool.
+
+        Performs health checks on all actors and removes those that are
+        unresponsive, dead, or unhealthy. Attempts to kill removed actors.
+        """
+        if not self._actor_pool:
+            return
+
+        ref_map = {m: m.actor.healthy.remote() for m in self._actor_pool}
+        refs = list(ref_map.values())
+
+        done, _ = ray.wait(refs, num_returns=len(refs), timeout=HEALTH_CHECK_TIMEOUT_S)
+
+        done_set = set(done)
+        healthy: list[ActorPoolMember[ActorInfoT]] = []
+
+        for member, ref in ref_map.items():
+            name = self.get_actor_name_from_actor_info(member.actor_info)
+            if ref in done_set:
+                try:
+                    if ray.get(ref, timeout=0):
+                        healthy.append(member)
+                    else:
+                        logger.warning(f"Actor {name} reported unhealthy; killing")
+                        try:
+                            ray.kill(member.actor, no_restart=True)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Actor {name} health check exception ({e}); killing")
+                    try:
+                        ray.kill(member.actor, no_restart=True)
+                    except Exception:
+                        pass
+            else:
+                logger.warning(f"Actor {name} health timeout; killing")
+                try:
+                    ray.kill(member.actor, no_restart=True)
+                except Exception:
+                    pass
+
+        self._actor_pool = healthy
+
     def _add_members_to_actor_pool(self, desired_num_actors: int) -> None:
         """Add new host actors to reach the desired pool size.
 
@@ -983,7 +1057,76 @@ class SliceActor(ResourcePoolManager[HostInfo]):
                     logger.info(f"Added actor {self.get_actor_name_from_actor_info(info)}")
                 except Exception as e:
                     logger.error(f"Failed to start host actor: {e}")
-                    _safe_kill_actor(actor)
+                    try:
+                        ray.kill(actor, no_restart=True)
+                    except Exception:
+                        pass
+
+    def _remove_members_from_actor_pool(self, desired_num_actors: int) -> None:
+        """Remove actors to reach the desired pool size.
+
+        Args:
+            desired_num_actors: Target number of actors in the pool.
+        """
+        while len(self._actor_pool) > desired_num_actors:
+            member = self._actor_pool.pop()
+            name = self.get_actor_name_from_actor_info(member.actor_info)
+            try:
+                try:
+                    ray.get(member.actor.shutdown.remote(), timeout=5)
+                except Exception:
+                    pass
+                ray.kill(member.actor, no_restart=True)
+                logger.info(f"Removed actor {name}")
+            except Exception as e:
+                logger.error(f"Failed to kill actor {name}: {e}")
+
+    def _scale_actor_pool(self, desired_num_actors: int) -> None:
+        """Scale the actor pool to the desired size.
+
+        First removes unhealthy actors, then adds or removes actors
+        as needed to reach the target size.
+
+        Args:
+            desired_num_actors: Target number of actors in the pool.
+        """
+        self._remove_unhealthy_members_from_actor_pool()
+        current = len(self._actor_pool)
+        if current < desired_num_actors:
+            self._add_members_to_actor_pool(desired_num_actors)
+        elif current > desired_num_actors:
+            self._remove_members_from_actor_pool(desired_num_actors)
+
+    def drain_actor_pool(self) -> None:
+        """Shut down and remove all actors from the pool.
+
+        Attempts graceful shutdown first, then forcefully kills actors.
+        Clears the actor pool after draining.
+        """
+        if not self._actor_pool:
+            return
+
+        shutdown_refs = []
+        for member in self._actor_pool:
+            try:
+                shutdown_refs.append(member.actor.shutdown.remote())
+            except Exception:
+                pass
+
+        try:
+            ray.wait(shutdown_refs, num_returns=len(shutdown_refs), timeout=5.0)
+        except Exception:
+            pass
+
+        for member in self._actor_pool:
+            name = self.get_actor_name_from_actor_info(member.actor_info)
+            try:
+                ray.kill(member.actor, no_restart=True)
+                logger.info(f"Killed actor {name}")
+            except Exception as e:
+                logger.error(f"Failed to kill actor {name}: {e}")
+
+        self._actor_pool = []
 
     def _await_all_hosts_healthy(self, timeout_s: int = 60, poll_s: float = 2.0) -> bool:
         """Wait for all hosts in the pool to become healthy.
@@ -1018,7 +1161,7 @@ class SliceActor(ResourcePoolManager[HostInfo]):
 
         Ensures all hosts are ready, then launches the function on each host
         in parallel. The function runs with TPU resources reserved. This is
-        the primary method used by RayExecutor.execute_multislice to run
+        the primary method used by RayExecutor.autoscale_execute to run
         workloads across the slice.
 
         Args:
@@ -1154,7 +1297,7 @@ class SlicePoolManager(ResourcePoolManager[SliceInfo]):
 
         Supports flexible scaling with multiple valid sizes. Will scale
         to the largest feasible size from the provided options. This method
-        is typically called by RayExecutor.execute_multislice to set up
+        is typically called by RayExecutor.autoscale_execute to set up
         the required number of slices.
 
         Args:
@@ -1199,25 +1342,6 @@ class SlicePoolManager(ResourcePoolManager[SliceInfo]):
                 raise InsufficientSlicesError(f"Requested one of {valid}, but only {current} slices available")
             self._scale_actor_pool(feasible[-1])
 
-    def _safe_gather_slice_infos(self) -> list[SliceInfo]:
-        """Gather slice infos one-by-one, pruning dead actors."""
-        slice_infos: list[SliceInfo] = []
-        good_members: list[ActorPoolMember[SliceInfo]] = []
-        for m in self._actor_pool:
-            try:
-                si = ray.get(m.actor.get_info.remote(), timeout=30)
-                slice_infos.append(si)
-                good_members.append(m)
-            except Exception as e:
-                _safe_kill_actor(m.actor)
-                logger.warning(f"Pruned dead SliceActor during prepare_all_slices: {e}")
-
-        if len(good_members) != len(self._actor_pool):
-            self._actor_pool = good_members
-            if not self._actor_pool:
-                raise RuntimeError("No SliceActors available after pruning.")
-        return slice_infos
-
     def prepare_all_slices(self) -> None:
         """Prepare all slices by ensuring host placement groups.
 
@@ -1225,22 +1349,54 @@ class SlicePoolManager(ResourcePoolManager[SliceInfo]):
         placement groups for distributed execution. This ensures that
         all nodes are ready before task execution begins.
 
+        This method:
+        1. Fetches slice information from all SliceActors.
+        2. Requests host resources for each slice from autoscaler.
+        3. Creates placement groups with STRICT_SPREAD strategy.
+        4. Ensures all hosts are discovered and ready.
+
         Note:
-            Called automatically by execute_multislice before running tasks.
+            Called automatically by autoscale_execute before running tasks.
             Essential for proper multi-host coordination within each slice.
         """
+
         if os.getenv("EFORMER_SAFE_GATHER", "1") == "1":
-            slice_infos = self._safe_gather_slice_infos()
+            slice_infos = []
+            good_members = []
+            for m in self._actor_pool:
+                try:
+                    si = ray.get(m.actor.get_info.remote(), timeout=30)
+                    slice_infos.append(si)
+                    good_members.append(m)
+                except Exception as e:
+                    try:
+                        ray.kill(m.actor, no_restart=True)
+                    except Exception:
+                        pass
+                    logger.warning(f"Pruned dead SliceActor during prepare_all_slices: {e}")
+
+            if len(good_members) != len(self._actor_pool):
+                self._actor_pool = good_members
+                if not self._actor_pool:
+                    raise RuntimeError("No SliceActors available after pruning.")
+
+            all_bundles = []
+            for info in slice_infos:
+                all_bundles.extend([{"CPU": 0, info.slice_name: 1}] * info.num_hosts)
+            if all_bundles:
+                request_resources(bundles=all_bundles)
+
+            ray.get([m.actor.prepare_hosts.remote() for m in self._actor_pool])
         else:
-            slice_infos = ray.get([m.actor.get_info.remote() for m in self._actor_pool])
+            slice_infos: list[SliceInfo] = ray.get([m.actor.get_info.remote() for m in self._actor_pool])
+            all_bundles = []
 
-        all_bundles = []
-        for info in slice_infos:
-            all_bundles.extend([{"CPU": 0, info.slice_name: 1}] * info.num_hosts)
-        if all_bundles:
-            request_resources(bundles=all_bundles)
+            for info in slice_infos:
+                all_bundles.extend([{"CPU": 0, info.slice_name: 1}] * info.num_hosts)
+            if all_bundles:
+                request_resources(bundles=all_bundles)
 
-        ray.get([m.actor.prepare_hosts.remote() for m in self._actor_pool])
+            ray.get([m.actor.prepare_hosts.remote() for m in self._actor_pool])
 
     def should_scale_up_multislice(self, valid_sizes: Sequence[int]) -> bool:
         """Check if pool should scale up to a larger size.
@@ -1442,15 +1598,21 @@ class SlicePoolManager(ResourcePoolManager[SliceInfo]):
                     logger.info(f"Added actor {self.get_actor_name_from_actor_info(info)} (slot {slot})")
                 except Exception as e:
                     logger.warning(f"SliceActor for slot {slot} failed to start: {e}; killing and re-queuing")
-                    _safe_kill_actor(actor)
+                    try:
+                        ray.kill(actor, no_restart=True)
+                    except Exception:
+                        pass
                     _start_for_slot(slot)
 
             logger.info(f"Started {started}/{desired_num_actors - current} slice actors so far")
 
         if slot_to_info_ref:
             for _, actor in slot_to_actor.items():
-                if not any(m.actor == actor for m in self._actor_pool):
-                    _safe_kill_actor(actor)
+                try:
+                    if not any(m.actor == actor for m in self._actor_pool):
+                        ray.kill(actor, no_restart=True)
+                except Exception:
+                    pass
             logger.info(f"Started {started}/{desired_num_actors - current} slice actors (timed out for the rest)")
 
     def _ensure_head_pg(self, desired_num_actors: int) -> None:

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1978,7 +1978,9 @@ def tree_replace_infs(tree: PyTree, value: tp.Any = 0.0) -> PyTree:
     return tu.tree_map(replace_inf, tree)
 
 
-def tree_flatten_one_level_with_keys(pytree: PyTree) -> tuple[list[tuple[KeyEntry | None, PyTree]], PyTreeDef]:  # type:ignore
+def tree_flatten_one_level_with_keys(
+    pytree: PyTree,
+) -> tuple[list[tuple[KeyEntry | None, PyTree]], PyTreeDef]:  # type:ignore
     """
     Adapted form equinox.tree_flatten_one_level to return keys
 

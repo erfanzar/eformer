@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -531,7 +531,7 @@ def match_partition_rules(
                 return PartitionSpec()
             size = np.prod(leaf.shape)
             if len(leaf.shape) == 0:
-                """ Don't partition scalar values. """
+                """Don't partition scalar values."""
                 return PartitionSpec()
 
             for rule, ps in rules:

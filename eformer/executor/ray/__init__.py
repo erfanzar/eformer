@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -78,8 +78,6 @@ from .executor import (
     autoscale_execute_resumable,
     device_remote,
     execute,
-    execute_multislice,
-    execute_multislice_resumable,
     execute_resumable,
 )
 from .pool_manager import (
@@ -154,8 +152,6 @@ __all__ = (
     "current_actor_handle",
     "device_remote",
     "execute",
-    "execute_multislice",
-    "execute_multislice_resumable",
     "execute_resumable",
     "handle_ray_error",
     "log_failures_to",

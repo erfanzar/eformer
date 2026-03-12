@@ -43,7 +43,7 @@ eformer packages the infrastructure the EasyDel project uses to run large JAX mo
 
 - `eformer.escale` provides semantic sharding via `PartitionAxis`, `PartitionManager`, `auto_namedsharding`, and helpers to convert per-layer rules into `PartitionSpec`s that respect DP/FSDP/TP/EP/SP axes.
 - Mesh tooling (`create_mesh`, `MeshPartitionHelper`) inspects pytree shapes and suggests sharding plans, while constraint utilities (`with_sharding_constraint`, `get_corrected_named_sharding`) fix up specs for real device meshes.
-- `eformer.executor` builds on Ray to launch pods or multi-slice TPU jobs with automatic retries (`RayExecutor.execute_resumable`, `execute_multislice_resumable`), Docker orchestration, and SLURM-friendly cluster discovery (`eSlurmCluster`, `auto_ray_cluster`).
+- `eformer.executor` builds on Ray to launch pods or multi-slice TPU jobs with automatic retries (`RayExecutor.execute_resumable`, `autoscale_execute_resumable`), Docker orchestration, and SLURM-friendly cluster discovery (`eSlurmCluster`, `auto_ray_cluster`).
 
 ### PyTree, Serialization & Storage
 
@@ -64,7 +64,7 @@ eformer packages the infrastructure the EasyDel project uses to run large JAX mo
 | --- | --- | --- |
 | `eformer.aparser` | Dataclass-first argument parsing & config loading | `Argu`, `DataClassArgumentParser.parse_args_into_dataclasses`, `parse_yaml_file` |
 | `eformer.escale` | Mesh + sharding orchestration across DP/FSDP/TP/EP/SP | `PartitionAxis`, `PartitionManager`, `auto_partition_spec`, `MeshPartitionHelper` |
-| `eformer.executor` | Ray-powered TPU/GPU executors, Docker helpers, SLURM glue | `RayExecutor`, `execute_multislice_resumable`, `auto_ray_cluster`, `TpuAcceleratorConfig` |
+| `eformer.executor` | Ray-powered TPU/GPU executors, Docker helpers, SLURM glue | `RayExecutor`, `autoscale_execute_resumable`, `auto_ray_cluster`, `TpuAcceleratorConfig` |
 | `eformer.jaximus` | Implicit arrays and custom PyTree runtime for quantized tensors | `ImplicitArray`, `register`, `implicit`, `ste` |
 | `eformer.mpric` | Mixed precision policies, dtype registries, dynamic loss scaling | `Policy`, `PrecisionHandler`, `LossScaleConfig`, `DynamicLossScale` |
 | `eformer.ops.quantization` | NF4/INT8/1-bit quantization kernels and STE wrappers | `QuantizationConfig`, `QuantizationType`, `ArrayNF4`, `Array8B`, `quantize`, `straight_through` |
@@ -192,7 +192,7 @@ loss, grads = jax.value_and_grad(loss_fn)(weight_fp32)
 import jax
 from eformer.common_types import BATCH, EMBED
 from eformer.escale import MeshPartitionHelper, PartitionAxis, PartitionManager, create_mesh
-from eformer.executor.ray import execute_multislice_resumable, TpuAcceleratorConfig
+from eformer.executor.ray import autoscale_execute_resumable, TpuAcceleratorConfig
 
 mesh = create_mesh(axis_dims=(2, 2), axis_names=("dp", "tp"))
 helper = MeshPartitionHelper(mesh)
@@ -202,7 +202,7 @@ with mesh:
     sharded_state = helper.auto_shard_pytree(train_state)
     hidden = manager.shard(hidden_states, axes=(BATCH, EMBED))
 
-job_status = execute_multislice_resumable(
+job_status = autoscale_execute_resumable(
     remote_fn=train_slice_remote,  # decorated with @ray.remote
     accelerator_config=TpuAcceleratorConfig(type="v4-8", pod_count=2),
     max_retries_preemption=5,

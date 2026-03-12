@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -768,14 +768,16 @@ def nf4_matmul(inputs, *tensors, kernel, backward=False, blocks=None):
                 pl.BlockSpec(index_map=lambda i, j, k: (i, k), block_shape=(block_x, block_k)),
             ]
             + [
-                pl.BlockSpec(
-                    index_map=lambda i, j, k: (k, 0, j),
-                    block_shape=(block_k // quant_group_size, t.shape[1], block_y),
-                )
-                if not weight_transpose
-                else pl.BlockSpec(
-                    index_map=lambda i, j, k: (j, 0, k),
-                    block_shape=(block_y // quant_group_size, t.shape[1], block_k),
+                (
+                    pl.BlockSpec(
+                        index_map=lambda i, j, k: (k, 0, j),
+                        block_shape=(block_k // quant_group_size, t.shape[1], block_y),
+                    )
+                    if not weight_transpose
+                    else pl.BlockSpec(
+                        index_map=lambda i, j, k: (j, 0, k),
+                        block_shape=(block_y // quant_group_size, t.shape[1], block_k),
+                    )
                 )
                 for t in tensors
             ],

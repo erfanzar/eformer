@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ from logging import getLogger as _getLogger
 
 _getLogger("jax.experimental.array_serialization.serialization").setLevel(40)
 
-__version__ = "0.0.99.3"
+__version__ = "0.0.99.4"
 
 __all__ = (
     "aparser",

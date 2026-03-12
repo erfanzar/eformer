@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,5 +44,29 @@ Example:
 
 from . import ray
 from .cluster_util import DistributedConfig, RayClusterConfig, auto_ray_cluster, eSlurmCluster
+from .ray import (
+    ComputeResourceConfig,
+    CpuAcceleratorConfig,
+    GpuAcceleratorConfig,
+    TpuAcceleratorConfig,
+    autoscale_execute,
+    autoscale_execute_resumable,
+    execute,
+    execute_resumable,
+)
 
-__all__ = ("DistributedConfig", "RayClusterConfig", "auto_ray_cluster", "eSlurmCluster", "ray")
+__all__ = (
+    "ComputeResourceConfig",
+    "CpuAcceleratorConfig",
+    "DistributedConfig",
+    "GpuAcceleratorConfig",
+    "RayClusterConfig",
+    "TpuAcceleratorConfig",
+    "auto_ray_cluster",
+    "autoscale_execute",
+    "autoscale_execute_resumable",
+    "eSlurmCluster",
+    "execute",
+    "execute_resumable",
+    "ray",
+)

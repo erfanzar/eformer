@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ def auto_partition_spec(
         names = [mesh.axis_names[i] for i in np.argsort([-s for s in mesh.devices.shape])]
 
     mesh_sizes = {
-        name: (np.prod([mesh.shape[n] for n in name]) if isinstance(name, tuple) else mesh.shape[name]) for name in names
+        name: np.prod([mesh.shape[n] for n in name]) if isinstance(name, tuple) else mesh.shape[name] for name in names
     }
 
     dim_indices = np.argsort([-dim if not reverse else dim for dim in x.shape])
@@ -129,7 +129,7 @@ def vrn_auto_partition_spec(
         names = [mesh.axis_names[i] for i in np.argsort([-s for s in mesh.devices.shape])]
 
     mesh_sizes = {
-        name: (np.prod([mesh.shape[n] for n in name]) if isinstance(name, tuple) else mesh.shape[name]) for name in names
+        name: np.prod([mesh.shape[n] for n in name]) if isinstance(name, tuple) else mesh.shape[name] for name in names
     }
 
     partition_spec = [None] * len(x.shape)

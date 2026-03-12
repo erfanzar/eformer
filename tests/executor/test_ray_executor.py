@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import ray
 
 from eformer.executor.ray.docker_executor import DockerConfig, run_docker_on_pod
 from eformer.executor.ray.executor import RayExecutor, _extract_runtime_env_vars, execute, execute_resumable
-from eformer.executor.ray.pool_manager import DeviceHostActor
+from eformer.executor.ray.pool_manager import DeviceHostActor, _preserve_metadata_slice_topology
 from eformer.executor.ray.resource_manager import CpuAcceleratorConfig, RayResources
 from eformer.executor.ray.types import JobSucceeded
 
@@ -79,6 +79,29 @@ def test_lockfile_cleanup_uses_noninteractive_sudo():
     assert run_cmd.call_args[0][0] == ["sudo", "-n", "rm", "-f", "/tmp/libtpu_lockfile"]
 
 
+def test_preserve_metadata_slice_topology_keeps_full_host_count_for_partial_ray_registration(monkeypatch):
+    monkeypatch.setenv("EFORMER_MODERATE", "1")
+
+    with (
+        patch("eformer.executor.ray.pool_manager.ray.cluster_resources", return_value={"slice-a": 1}),
+        patch("eformer.executor.ray.pool_manager.logger.warning") as warn,
+    ):
+        assert _preserve_metadata_slice_topology("slice-a", 8, 4) == (8, 4)
+
+    warn.assert_called_once()
+    assert "1/8 hosts for slice slice-a" in warn.call_args[0][0]
+
+
+def test_preserve_metadata_slice_topology_skips_ray_lookup_when_disabled(monkeypatch):
+    monkeypatch.setenv("EFORMER_MODERATE", "0")
+
+    with patch(
+        "eformer.executor.ray.pool_manager.ray.cluster_resources",
+        side_effect=AssertionError("cluster_resources should not be queried"),
+    ):
+        assert _preserve_metadata_slice_topology("slice-a", 8, 4) == (8, 4)
+
+
 def test_execute_supports_plain_functions_with_positional_args(local_ray):
     @execute(CpuAcceleratorConfig(core_count=1, worker_count=1))
     def plain_add(x, y):
@@ -108,7 +131,7 @@ def test_execute_resumable_preserves_positional_retry_arguments(local_ray):
 
 
 def test_execute_multislice_preserves_positional_flatten_parameter():
-    flatten = inspect.signature(RayExecutor.execute_multislice).parameters["flatten"]
+    flatten = inspect.signature(RayExecutor.autoscale_execute).parameters["flatten"]
 
     assert flatten.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
 

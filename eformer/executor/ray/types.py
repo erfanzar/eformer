@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -527,7 +527,7 @@ def log_failures_to(parent, suppress: bool = False):
 
         parent._child_failed.remote(handle, ExceptionInfo.ser_exc_info(e))
         if not suppress:
-            raise
+            raise e
 
 
 DEFAULT_LOG_LEVEL = logging.INFO
@@ -595,8 +595,8 @@ class StopwatchActor:
         self._total += 1
 
         if self._total % 1000 == 0:
-            for key, total_time in self._times_per.items():
-                self._logger.info(f"{key}: {total_time / self._counts_per[key]}")
+            for name, time in self._times_per.items():
+                self._logger.info(f"{name}: {time / self._counts_per[name]}")
 
     def get(self, name: str) -> tuple[float, int]:
         """Get total time and count for a named operation.

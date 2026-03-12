@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The EasyDeL/eFormer Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -201,11 +201,6 @@ class RayResources:
         )
 
     @staticmethod
-    def fork_disabled() -> bool:
-        """Return whether subprocess isolation is disabled via environment."""
-        return os.getenv("EFORMER_DISABLE_FORK", "0").strip().lower() in {"1", "yes", "on", "true"}
-
-    @staticmethod
     def forkify_remote_fn(remote_fn: RemoteFunction | Callable):
         """Wrap a remote function to execute in a separate process.
 
@@ -219,8 +214,8 @@ class RayResources:
                 to be wrapped with process isolation.
 
         Returns:
-            RemoteFunction | Callable: The wrapped function that will execute
-                in a separate process.
+            RemoteFunction | functools.partial: The wrapped function that will
+                execute in a separate process.
 
         Example:
             >>> @ray.remote
@@ -244,12 +239,7 @@ class RayResources:
             )
             return remote_fn
         else:
-
-            @functools.wraps(remote_fn)
-            def wrapped_fn(*args, **kwargs):
-                return RayResources.separate_process_fn(remote_fn, args, kwargs)
-
-            return wrapped_fn
+            return functools.partial(RayResources.separate_process_fn, remote_fn)
 
     @staticmethod
     def separate_process_fn(underlying_function, args, kwargs):
@@ -258,17 +248,6 @@ class RayResources:
         This method runs the specified function in an isolated subprocess,
         capturing results or exceptions and handling process lifecycle management.
         It provides robust error handling and timeout protection.
-
-        .. important:: **EFORMER_DISABLE_FORK (default ``"0"``)**
-
-            By default this helper keeps the historical subprocess isolation,
-            so each invocation runs in a fresh child process and long-lived
-            Ray workers do not retain user-code state between calls.
-
-            Set ``EFORMER_DISABLE_FORK=1`` to execute directly inside the Ray
-            worker when running on environments where ``fork()`` duplicates
-            invalid device/runtime state (for example some TPU/libtpu setups).
-
 
         Args:
             underlying_function (Callable): The function to execute in subprocess.
@@ -280,7 +259,7 @@ class RayResources:
 
         Raises:
             RuntimeError: If the subprocess times out.
-            Exception: Re-raises the original exception from the subprocess.
+            ValueError: If the subprocess execution fails with an exception.
 
         Example:
             >>> def add(x, y):
@@ -288,9 +267,6 @@ class RayResources:
             >>> result = RayResources.separate_process_fn(add, (2, 3), {})
             >>> print(result)
         """
-
-        if RayResources.fork_disabled():
-            return underlying_function(*args, **kwargs)
 
         def target_fn(queue, args, kwargs):
             try:
@@ -322,7 +298,7 @@ class RayResources:
         if success:
             return value
         else:
-            value.reraise()
+            raise ValueError(value)
 
     @staticmethod
     def update_fn_resource_env(
@@ -712,7 +688,7 @@ class CpuAcceleratorConfig(ComputeResourceConfig):
     core_count: int = field(default_factory=available_cpu_cores)
     execution_env: RuntimeEnv = field(default_factory=RuntimeEnv)
     resource_name: str = field(default="CPU")
-    runtime_name: str = field(default_factory=lambda: str(uuid.uuid4()))
+    runtime_name: str = field(default_factory=uuid.uuid4)
     worker_count: int = 1
 
     def hardware_identifier(self) -> str | None:
@@ -846,7 +822,7 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
     gpu_model: str | None = None
     cpu_count: int = 1
     chips_per_host: int = field(default_factory=NvidiaGPUAcceleratorManager.get_current_node_num_accelerators)
-    runtime_name: str = field(default_factory=lambda: str(uuid.uuid4()))
+    runtime_name: str = field(default_factory=uuid.uuid4)
     worker_count: int = 1
     resource_name: str = field(default="GPU")
 
@@ -961,6 +937,7 @@ class GpuAcceleratorConfig(ComputeResourceConfig):
         }
         if self.gpu_model is not None:
             remote_options["accelerator_type"] = self.gpu_model
+
         return remote_fn.options(**remote_options)
 
 
