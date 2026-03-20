@@ -186,8 +186,7 @@ def default_handler(primitive, *args, **params):
     Returns:
         Result of executing the primitive with the given arguments.
     """
-    subfuns, bind_params = primitive.get_bind_params(params)
-    return primitive.bind(*subfuns, *args, **bind_params)
+    return _bind_primitive(primitive, args, params)
 
 
 def _materialize_all(vals):
@@ -222,8 +221,7 @@ def materialize_handler(primitive, *vals, params):
         Result of executing the primitive after materializing all values.
     """
     vals = _materialize_all(vals)
-    subfuns, bind_params = primitive.get_bind_params(params)
-    result = primitive.bind(*subfuns, *vals, **bind_params)
+    result = _bind_primitive(primitive, vals, params)
     return result
 
 
@@ -979,7 +977,22 @@ def _default_process(
     values: Sequence[chex.Array | ImplicitArray],
     params,
 ):
-    arrays: list[chex.Array] = []
+    arrays = _materialize_values(values)
+    return _bind_primitive(primitive, arrays, params)
+
+
+def _bind_primitive(primitive: core.Primitive, args: Sequence[tp.Any], params):
+    bind_spec = primitive.get_bind_params(params)
+    if isinstance(bind_spec, tuple) and len(bind_spec) == 2:
+        subfuns, bind_params = bind_spec
+    else:
+        bind_params = dict(bind_spec)
+        subfuns = bind_params.pop("subfuns", ())
+    return primitive.bind(*subfuns, *args, **bind_params)
+
+
+def _materialize_values(values: Sequence[chex.Array | ImplicitArray]) -> list[tp.Any]:
+    arrays: list[tp.Any] = []
     for x in values:
         if _is_value(x):
             arrays.append(x.materialize())
@@ -987,9 +1000,7 @@ def _default_process(
             arrays.append(tp.cast(chex.Array, x))
         else:
             arrays.append(x)
-
-    subfuns, bind_params = primitive.get_bind_params(params)
-    return primitive.bind(*subfuns, *arrays, **bind_params)
+    return arrays
 
 
 def _wrap_tracer(x, trace: _CustomTrace):
@@ -1063,7 +1074,7 @@ class _CustomTracer(core.Tracer):
             return core.full_lower(self.value)
 
 
-class _CustomTrace(core.Trace[_CustomTracer]):
+class _CustomTrace(core.Trace):
     """JAX trace implementation for implicit array dispatch.
 
     This trace intercepts primitive operations and routes them to registered
@@ -1157,8 +1168,7 @@ class _CustomTrace(core.Trace[_CustomTracer]):
                         out = method(*values, **params)
         else:
             with core.set_current_trace(self.parent_trace):
-                subfuns, bind_params = primitive.get_bind_params(params)
-                out = primitive.bind(*subfuns, *values, **bind_params)
+                out = _bind_primitive(primitive, values, params)
         if primitive.multiple_results:
             out = [_CustomTracer(self, x) for x in out]
         else:
@@ -1178,8 +1188,12 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         else:
             return _CustomTracer(self, out)
 
-    def process_map(self, map_primitive, f, tracers, **params):
+    def process_map(self, map_primitive, f, tracers, params=None, /, **kwargs):
         """Process map primitives (pmap, etc.) by materializing inputs."""
+        if params is None:
+            params = kwargs
+        elif kwargs:
+            params = {**params, **kwargs}
         in_values = [self.to_value(t) for t in tracers]
         with core.set_current_trace(self.parent_trace):
             out = _default_process(map_primitive, in_values, params)
@@ -1208,33 +1222,31 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         else:
             return _CustomTracer(self, out)
 
-    def process_custom_jvp_call(
-        self,
-        primitive,
-        fun,
-        fwd,
-        bwd,
-        tracers,
-        out_trees,
-        symbolic_zeros,
-    ):
+    def process_custom_jvp_call(self, primitive, fun, *args, symbolic_zeros=None, **kwargs):
         """Process custom JVP calls by materializing inputs.
 
         Custom JVP requires concrete arrays, so all ImplicitArrays are
         materialized before the forward pass is executed.
         """
-        del fwd, bwd, out_trees, symbolic_zeros
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected keyword arguments in process_custom_jvp_call: {unexpected}")
+        if len(args) == 2:
+            jvp, tracers = args
+        elif len(args) == 5:
+            _fwd, _bwd, tracers, _out_trees, symbolic_zeros = args
+            jvp = _fwd
+        else:
+            raise TypeError(f"Unexpected process_custom_jvp_call arguments: {len(args)} positional values")
         in_values = [self.to_value(t) for t in tracers]
-        arrays: list[chex.Array] = []
-        for x in in_values:
-            if _is_value(x):
-                arrays.append(x.materialize())
-            elif is_array(x):
-                arrays.append(tp.cast(chex.Array, x))
-            else:
-                arrays.append(x)
         with core.set_current_trace(self.parent_trace):
-            out_leaves = fun.call_wrapped(*arrays)
+            arrays = _materialize_values(in_values)
+            out_leaves = primitive.bind_with_trace(
+                self.parent_trace,
+                tuple(arrays),
+                tuple(core.typeof(x) for x in arrays),
+                {"subfuns": (fun, jvp), "symbolic_zeros": symbolic_zeros},
+            )
         if primitive.multiple_results:
             return [_CustomTracer(self, x) for x in out_leaves]
         else:
@@ -1247,26 +1259,35 @@ class _CustomTrace(core.Trace[_CustomTracer]):
         fwd,
         bwd,
         tracers,
-        out_trees,
-        symbolic_zeros,
+        out_trees=None,
+        symbolic_zeros=None,
+        **kwargs,
     ):
         """Process custom VJP calls by materializing inputs.
 
         Custom VJP requires concrete arrays for the forward pass,
         so all ImplicitArrays are materialized before execution.
         """
-        del fwd, bwd, out_trees, symbolic_zeros
+        if out_trees is None and "out_trees" in kwargs:
+            out_trees = kwargs.pop("out_trees")
+        if symbolic_zeros is None and "symbolic_zeros" in kwargs:
+            symbolic_zeros = kwargs.pop("symbolic_zeros")
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected keyword arguments in process_custom_vjp_call: {unexpected}")
         in_values = [self.to_value(t) for t in tracers]
-        arrays: list[chex.Array] = []
-        for x in in_values:
-            if _is_value(x):
-                arrays.append(x.materialize())
-            elif is_array(x):
-                arrays.append(tp.cast(chex.Array, x))
-            else:
-                arrays.append(x)
         with core.set_current_trace(self.parent_trace):
-            out_leaves = fun.call_wrapped(*arrays)
+            arrays = _materialize_values(in_values)
+            out_leaves = primitive.bind_with_trace(
+                self.parent_trace,
+                tuple(arrays),
+                tuple(core.typeof(x) for x in arrays),
+                {
+                    "subfuns": (fun, fwd, bwd),
+                    "out_trees": out_trees,
+                    "symbolic_zeros": symbolic_zeros,
+                },
+            )
         if primitive.multiple_results:
             return [_CustomTracer(self, x) for x in out_leaves]
         else:
