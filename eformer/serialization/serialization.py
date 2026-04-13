@@ -32,6 +32,8 @@ from eformer.escale import match_partition_rules
 from eformer.loggings import get_logger
 from eformer.paths import ePath
 
+from . import fsspec_utils
+
 logger = get_logger(__name__)
 
 __all__ = [
@@ -228,7 +230,7 @@ def tree_serialize_leaves(
     if manager_was_none:
         manager.wait_until_finished()
 
-    if write_index and array_info:
+    if write_index and array_info and fsspec_utils.should_write_shared_checkpoint_files(checkpoint_dir):
         index_path = ePath(checkpoint_dir) / "tensorstore_index.json"
         if index_path.exists():
             index_data = json.loads(index_path.read_text())

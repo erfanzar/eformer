@@ -59,10 +59,36 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import fsspec
 import jax
 import jax.numpy as jnp
 import numpy as np
 from google.cloud import storage
+
+
+def path_protocol(path: tp.Union[str, Path, "UniversalPath"]) -> str:
+    """Return the normalized protocol for a path-like input.
+
+    Plain local paths and ``file://`` URLs normalize to ``"file"``.
+    Remote URLs such as ``gs://`` and ``s3://`` return their scheme.
+    """
+    if isinstance(path, GCSPath):
+        return "gs"
+    if isinstance(path, LocalPath):
+        return "file"
+
+    protocol, _ = fsspec.core.split_protocol(str(path))
+    return protocol or "file"
+
+
+def is_remote_path(path: tp.Union[str, Path, "UniversalPath"]) -> bool:
+    """Return True when a path points at a non-local backend."""
+    return path_protocol(path) != "file"
+
+
+def is_local_path(path: tp.Union[str, Path, "UniversalPath"]) -> bool:
+    """Return True when a path points at the local filesystem."""
+    return not is_remote_path(path)
 
 
 class UniversalPath(ABC):

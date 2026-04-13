@@ -463,7 +463,8 @@ class Checkpointer:
             ```
         """
         path = fsspec_utils.join_path(self.base_path, destination)
-        fsspec_utils.mkdirs(path)
+        if fsspec_utils.should_write_shared_checkpoint_files(path):
+            fsspec_utils.mkdirs(path)
 
         logger.info(f"Saving checkpoint to {path}")
 
@@ -801,7 +802,8 @@ class Checkpointer:
         if step is not None:
             dest = destination or f"run-{int(step)}"
             path = fsspec_utils.join_path(self.base_path, str(dest))
-        fsspec_utils.mkdirs(path)
+        if fsspec_utils.should_write_shared_checkpoint_files(path):
+            fsspec_utils.mkdirs(path)
         extras = extras or {}
         if step is not None:
             extras["step"] = int(step)

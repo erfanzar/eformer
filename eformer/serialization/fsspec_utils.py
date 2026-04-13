@@ -18,7 +18,10 @@ import os
 
 import braceexpand
 import fsspec
+import jax
 from fsspec.asyn import AsyncFileSystem
+
+from eformer.paths import is_remote_path
 
 
 def exists(url, **kwargs) -> bool:
@@ -64,6 +67,16 @@ def mkdirs(path):
     """
     fs, path = fsspec.core.url_to_fs(path)
     fs.makedirs(path, exist_ok=True)
+
+
+def should_write_shared_checkpoint_files(path) -> bool:
+    """Whether the current process should write shared checkpoint metadata.
+
+    Local files keep the historical behavior where every process may perform the
+    shared setup/writes. Remote/object-store paths are restricted to process 0 to
+    avoid cross-host contention on shared metadata files.
+    """
+    return not is_remote_path(path) or jax.process_index() == 0
 
 
 def expand_glob(url):

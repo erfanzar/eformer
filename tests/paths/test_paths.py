@@ -17,7 +17,7 @@
 import jax.numpy as jnp
 import numpy as np
 
-from eformer.paths import GCSPath, LocalPath, MLUtilPath, PathManager
+from eformer.paths import GCSPath, LocalPath, MLUtilPath, PathManager, is_local_path, is_remote_path, path_protocol
 
 
 def test_local_path_read_write_and_stat(tmp_path):
@@ -91,6 +91,19 @@ def test_path_manager_local_and_gcs():
     gcs = manager("gs://bucket/path.txt")
     assert isinstance(gcs, GCSPath)
     assert gcs.client is fake_client
+
+
+def test_path_protocol_helpers():
+    assert path_protocol("/tmp/example.txt") == "file"
+    assert path_protocol("file:///tmp/example.txt") == "file"
+    assert path_protocol("gs://bucket/path.txt") == "gs"
+    assert path_protocol("s3://bucket/path.txt") == "s3"
+
+    assert is_local_path("/tmp/example.txt") is True
+    assert is_local_path(LocalPath("/tmp/example.txt")) is True
+    assert is_remote_path("gs://bucket/path.txt") is True
+    assert is_remote_path("s3://bucket/path.txt") is True
+    assert is_remote_path(GCSPath("gs://bucket/path.txt", client=object())) is True
 
 
 def test_mlutilpath_save_load_and_copy(tmp_path):

@@ -31,6 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.distributed import is_initialized
 from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
+from jax.experimental import multihost_utils as mh
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from safetensors import flax as safe_flax
 from tqdm.autonotebook import tqdm
@@ -112,6 +113,17 @@ def _is_none(x):
         bool: True if x is None, False otherwise.
     """
     return x is None
+
+
+def _sync_remote_checkpoint_visibility(path: ePathLike | str, *, scope: str) -> None:
+    """Block multihost callers until shared remote checkpoint files are visible."""
+    if not fsspec_utils.is_remote_path(path):
+        return
+    if jax.process_count() <= 1 or not is_initialized():
+        return
+
+    token = hashlib.sha1(f"{scope}:{path}".encode("utf-8")).hexdigest()[:12]
+    mh.sync_global_devices(f"eformer-checkpoint-{scope}-{token}")
 
 
 @dataclass
@@ -584,6 +596,7 @@ class AsyncCheckpointManager:
             multiple prefixes in v2.0 format. Also saves checkpoint metadata
             separately.
         """
+        write_shared_files = fsspec_utils.should_write_shared_checkpoint_files(path)
 
         pytree = unflatten_dict(tree, sep=".")
 
@@ -593,13 +606,15 @@ class AsyncCheckpointManager:
             manager=self.global_manager,
             prefix=prefix,
             commit_callback=lambda: logger.info("Committed checkpoint to Tensorstore"),
-            write_index=True,
+            write_index=write_shared_files,
         )
         self.global_manager.wait_until_finished()
 
         logger.info("Committed checkpoint to Tensorstore")
-        meta_path = ePath(path) / "checkpoint_metadata.json"
-        meta_path.write_text(json.dumps(metadata.to_dict()))
+        if write_shared_files:
+            meta_path = ePath(path) / "checkpoint_metadata.json"
+            meta_path.write_text(json.dumps(metadata.to_dict()))
+        _sync_remote_checkpoint_visibility(path, scope=f"save-tree:{prefix or 'root'}")
 
         return path
 
@@ -1040,7 +1055,9 @@ class AsyncCheckpointManager:
             raise ValueError("A non-empty string prefix is required")
 
         root = ePath(path)
-        root.mkdir(parents=True, exist_ok=True)
+        write_shared_files = fsspec_utils.should_write_shared_checkpoint_files(path)
+        if write_shared_files:
+            root.mkdir(parents=True, exist_ok=True)
 
         if do_all_gather:
             use_dtype = dtype or self.float_dtype
@@ -1074,10 +1091,13 @@ class AsyncCheckpointManager:
             pytree=pytree,
             manager=self.global_manager,
             prefix=prefix,
-            write_index=write_index,
+            write_index=write_index and write_shared_files,
         )
 
         self.global_manager.wait_until_finished()
+        if not write_shared_files:
+            return str(root)
+
         index_path = root / "tensorstore_index.json"
         if not index_path.exists():
             raise FileNotFoundError(f"Missing tensorstore_index.json in {root}")
@@ -1122,7 +1142,7 @@ class AsyncCheckpointManager:
 
         meta = CheckpointMetadata(timestamp=datetime.now().isoformat(), custom_metadata=extras)
         (root / "checkpoint_metadata.json").write_text(json.dumps(meta.to_dict(), indent=2))
-
+        
         return str(root)
 
     def load_pytree(
