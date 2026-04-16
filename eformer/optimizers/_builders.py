@@ -236,6 +236,7 @@ class AdamWOptimizer(OptimizerBuilder):
             eps=self.config.eps,
             eps_root=self.config.eps_root,
             mu_dtype=self.config.mu_dtype,
+            weight_decay=0.0,
         )
 
 

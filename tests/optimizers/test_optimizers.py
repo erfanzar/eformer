@@ -484,6 +484,46 @@ class TestBuilderPattern:
         updates, _new_state = tx.update(grads, state, params)
         assert "w" in updates
 
+    def test_adamw_builder_build_has_no_hidden_weight_decay(self):
+        """Test AdamWOptimizer builder does not inherit optax's default weight decay."""
+        builder = AdamWOptimizer(config=AdamWConfig())
+        scheduler = optax.constant_schedule(1.0)
+
+        tx = builder.build(scheduler)
+        params = {"w": jnp.array([1.0])}
+        state = tx.init(params)
+        zero_grads = {"w": jnp.array([0.0])}
+        updates, _new_state = tx.update(zero_grads, state, params)
+
+        assert jnp.allclose(updates["w"], jnp.array([0.0]))
+
+    def test_factory_adamw_weight_decay_controls_updates(self):
+        """Test factory weight_decay is the only default decay applied for AdamW."""
+        scheduler_config = SchedulerConfig(learning_rate=1.0)
+        params = {"w": jnp.array([1.0])}
+        zero_grads = {"w": jnp.array([0.0])}
+
+        no_decay_tx, _ = OptimizerFactory.create(
+            "adamw",
+            scheduler_config,
+            AdamWConfig(),
+            weight_decay=0.0,
+        )
+        no_decay_state = no_decay_tx.init(params)
+        no_decay_updates, _ = no_decay_tx.update(zero_grads, no_decay_state, params)
+
+        decay_tx, _ = OptimizerFactory.create(
+            "adamw",
+            scheduler_config,
+            AdamWConfig(),
+            weight_decay=0.5,
+        )
+        decay_state = decay_tx.init(params)
+        decay_updates, _ = decay_tx.update(zero_grads, decay_state, params)
+
+        assert jnp.allclose(no_decay_updates["w"], jnp.array([0.0]))
+        assert jnp.allclose(decay_updates["w"], jnp.array([-0.5]))
+
     def test_lion_builder_build(self):
         """Test LionOptimizer builder builds correct transformation."""
         config = LionConfig(b1=0.9, b2=0.99)

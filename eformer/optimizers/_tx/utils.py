@@ -209,6 +209,8 @@ def get_base_optimizer(
     if optimizer_type == "adafactor":
         optimizer = optax.adafactor(learning_rate=scheduler, **optimizer_kwargs)
     elif optimizer_type == "adamw":
+        optimizer_kwargs = dict(optimizer_kwargs)
+        optimizer_kwargs.setdefault("weight_decay", 0.0)
         optimizer = optax.adamw(learning_rate=scheduler, **optimizer_kwargs)
     elif optimizer_type == "lion":
         optimizer = optax.lion(learning_rate=scheduler, **optimizer_kwargs)
