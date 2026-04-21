@@ -36,6 +36,9 @@ from . import fsspec_utils
 
 logger = get_logger(__name__)
 
+
+GLOBAL_CHECKPOINT_TIMEOUT = int(os.getenv("GLOBAL_CHECKPOINT_TIMEOUT", "400"))
+
 __all__ = [
     "is_array_like",
     "leaf_key_paths",
@@ -179,7 +182,7 @@ def tree_serialize_leaves(
         prefixes in version 2.0 format.
     """
     if manager is None:
-        manager = array_ser.GlobalAsyncCheckpointManager()
+        manager = array_ser.GlobalAsyncCheckpointManager(timeout_secs=GLOBAL_CHECKPOINT_TIMEOUT)
         manager_was_none = True
     else:
         manager_was_none = False
@@ -388,7 +391,7 @@ def tree_deserialize_leaves(
         to load or an error will be raised listing available prefixes.
     """
     if manager is None:
-        manager = array_ser.GlobalAsyncCheckpointManager()
+        manager = array_ser.GlobalAsyncCheckpointManager(timeout_secs=GLOBAL_CHECKPOINT_TIMEOUT)
 
     index_path = ePath(checkpoint_dir) / "tensorstore_index.json"
 

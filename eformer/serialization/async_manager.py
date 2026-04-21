@@ -30,8 +30,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.distributed import is_initialized
-from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
 from jax.experimental import multihost_utils as mh
+from jax.experimental.array_serialization.serialization import GlobalAsyncCheckpointManager
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from safetensors import flax as safe_flax
 from tqdm.autonotebook import tqdm
@@ -51,6 +51,7 @@ from .utils import read_process_array as _read_process_array
 from .utils import to_host as _to_host
 
 logger = get_logger("AsyncCheckpointManager")
+GLOBAL_CHECKPOINT_TIMEOUT = int(os.getenv("GLOBAL_CHECKPOINT_TIMEOUT", "400"))
 
 
 def _is_array_like(x):
@@ -122,7 +123,7 @@ def _sync_remote_checkpoint_visibility(path: ePathLike | str, *, scope: str) -> 
     if jax.process_count() <= 1 or not is_initialized():
         return
 
-    token = hashlib.sha1(f"{scope}:{path}".encode("utf-8")).hexdigest()[:12]
+    token = hashlib.sha1(f"{scope}:{path}".encode()).hexdigest()[:12]
     mh.sync_global_devices(f"eformer-checkpoint-{scope}-{token}")
 
 
@@ -297,7 +298,7 @@ class AsyncCheckpointManager:
             GlobalAsyncCheckpointManager: The singleton manager instance.
         """
         if self._global_manager is None:
-            self._global_manager = GlobalAsyncCheckpointManager()
+            self._global_manager = GlobalAsyncCheckpointManager(timeout_secs=GLOBAL_CHECKPOINT_TIMEOUT)
         return self._global_manager
 
     @staticmethod
@@ -1142,7 +1143,7 @@ class AsyncCheckpointManager:
 
         meta = CheckpointMetadata(timestamp=datetime.now().isoformat(), custom_metadata=extras)
         (root / "checkpoint_metadata.json").write_text(json.dumps(meta.to_dict(), indent=2))
-        
+
         return str(root)
 
     def load_pytree(
