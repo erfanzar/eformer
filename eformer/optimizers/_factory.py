@@ -27,7 +27,7 @@ import optax
 from . import _builders, _tx  # noqa
 
 # Import base classes and registries
-from ._base import _OPTIMIZER_BUILDER_REGISTRY
+from ._base import _OPTIMIZER_BUILDER_REGISTRY, OptimizerBuilder
 from ._config import (
     AdafactorConfig,
     AdamWConfig,
@@ -41,6 +41,7 @@ from ._config import (
     SoapConfig,
     WhiteKronConfig,
 )
+from ._stage_local import make_unsupported_stage_local_gradient_transformation
 from ._tx import optax_add_scheduled_weight_decay
 
 TxConfigs = (
@@ -287,7 +288,9 @@ class OptimizerFactory:
 
         # Build the full optimizer chain (clip, base optimizer, weight decay, multi-step)
         return cls._build_optimizer_chain(
+            builder=builder,
             base_optimizer=base_optimizer,
+            optimizer_type=optimizer_type,
             scheduler=scheduler,
             weight_decay=weight_decay,
             weight_decay_mask=weight_decay_mask,
@@ -339,26 +342,41 @@ class OptimizerFactory:
 
     @staticmethod
     def _build_optimizer_chain(
+        builder: OptimizerBuilder,
         base_optimizer: optax.GradientTransformation,
+        optimizer_type: str,
         scheduler: optax.Schedule,
         weight_decay: float = 0.0,
         weight_decay_mask: tp.Any | None = None,
         gradient_accumulation_steps: int = 1,
         clip_grad: float | None = None,
     ) -> tuple[optax.GradientTransformation, optax.Schedule]:
-        """
-        Construct the final optimizer chain with gradient clipping, weight decay, and accumulation.
+        """Construct the final optimizer chain with gradient clipping, weight decay, and accumulation.
+
+        This method assembles the standard eFormer chain (clip -> base -> weight
+        decay -> multi-step) and then attempts to wrap it with a pipeline-parallel
+        stage-local path by calling ``builder.build_mpmd(...)``. If the builder
+        does not implement :meth:`OptimizerBuilder.build_mpmd`, a fallback
+        wrapper is installed that preserves the normal Optax path but raises a
+        clear error when stage-local application is attempted.
 
         Args:
-            base_optimizer: Base optimizer transformation.
-            scheduler: Learning rate scheduler.
-            weight_decay: Weight decay coefficient. Defaults to 0.0.
+            builder: The optimizer builder instance used to construct the base
+                optimizer. Its :meth:`build_mpmd` hook is invoked at the end of
+                the chain.
+            base_optimizer: Base optimizer transformation produced by
+                ``builder.build(scheduler)``.
+            optimizer_type: Registered optimizer name (e.g. ``"adamw"``).
+            scheduler: Learning rate scheduler paired with the optimizer.
+            weight_decay: Global weight-decay coefficient. Defaults to 0.0.
             weight_decay_mask: Mask for weight decay application. Defaults to None.
             gradient_accumulation_steps: Steps for gradient accumulation. Defaults to 1.
             clip_grad: Global gradient norm clipping value. Defaults to None.
 
         Returns:
-            Tuple[optax.GradientTransformation, optax.Schedule]: A tuple containing the optimizer chain and scheduler.
+            Tuple[optax.GradientTransformation, optax.Schedule]: A tuple containing
+            the fully assembled optimizer chain (possibly with a stage-local
+            wrapper) and the scheduler.
         """
         chain = []
 
@@ -384,6 +402,22 @@ class OptimizerFactory:
         # Add gradient accumulation if specified
         if gradient_accumulation_steps > 1:
             tx = optax.MultiSteps(tx, gradient_accumulation_steps)
+
+        try:
+            tx = builder.build_mpmd(
+                scheduler,
+                optimizer=tx,
+                weight_decay=weight_decay,
+                weight_decay_mask=weight_decay_mask,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                clip_grad=clip_grad,
+            )
+        except NotImplementedError as exc:
+            tx = make_unsupported_stage_local_gradient_transformation(
+                tx,
+                optimizer_type=optimizer_type,
+                reason=str(exc),
+            )
 
         return tx, scheduler
 

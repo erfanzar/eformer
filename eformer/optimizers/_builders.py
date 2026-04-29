@@ -14,6 +14,7 @@
 
 
 import dataclasses
+import typing as tp
 
 import optax
 
@@ -28,7 +29,73 @@ from ._config import (
     SchedulerConfig,
     WhiteKronConfig,
 )
+from ._stage_local import (
+    StageLocalOptimizerMetadata,
+    _apply_adafactor_stage_local,
+    _apply_adamw_stage_local,
+    _apply_lion_stage_local,
+    _apply_mars_stage_local,
+    _apply_muon_stage_local,
+    _apply_quad_stage_local,
+    _apply_rmsprop_stage_local,
+    _apply_skew_stage_local,
+    make_stage_local_gradient_transformation,
+)
 from ._tx import mars, quad, skew
+
+
+def _build_metadata_mpmd_optimizer(
+    config: tp.Any,
+    scheduler: optax.Schedule,
+    *,
+    optimizer: optax.GradientTransformation,
+    stage_local_apply: tp.Callable[..., tuple[optax.Params, optax.OptState]],
+    **tx_kwargs: tp.Any,
+) -> optax.GradientTransformation:
+    """Wrap an optimizer chain with stage-local metadata for PP training.
+
+    This helper constructs a :class:`StageLocalOptimizerMetadata` dataclass
+    from the builder's configuration and the factory-level hyperparameters,
+    then attaches it to the optimizer chain via
+    :func:`make_stage_local_gradient_transformation`. The resulting
+    transformation supports both normal Optax updates and explicit
+    stage-local applications inside pipeline-parallel training loops.
+
+    Args:
+        config: The optimizer-specific configuration object (e.g. ``AdamWConfig``).
+        scheduler: Learning rate schedule paired with the optimizer.
+        optimizer: Fully assembled optimizer chain from the factory.
+        stage_local_apply: Optimizer-specific stage-local update kernel.
+        **tx_kwargs: Factory-level transform options such as ``weight_decay``,
+            ``weight_decay_mask``, ``gradient_accumulation_steps``, and
+            ``clip_grad``.
+
+    Returns:
+        A :class:`StageLocalGradientTransformation` wrapping ``optimizer``.
+    """
+
+    known_tx_kwargs = {
+        "weight_decay",
+        "weight_decay_mask",
+        "gradient_accumulation_steps",
+        "clip_grad",
+    }
+    extra_kwargs = {key: value for key, value in tx_kwargs.items() if key not in known_tx_kwargs}
+    metadata = StageLocalOptimizerMetadata(
+        scheduler=scheduler,
+        weight_decay=float(tx_kwargs.get("weight_decay", 0.0)),
+        weight_decay_mask=tx_kwargs.get("weight_decay_mask"),
+        gradient_accumulation_steps=int(tx_kwargs.get("gradient_accumulation_steps", 1)),
+        clip_grad=tx_kwargs.get("clip_grad"),
+        adamw_b1=getattr(config, "b1", None),
+        adamw_b2=getattr(config, "b2", None),
+        adamw_eps=getattr(config, "eps", None),
+        adamw_eps_root=getattr(config, "eps_root", None),
+        adamw_mu_dtype=getattr(config, "mu_dtype", None),
+        optimizer_config=config,
+        extra_kwargs=extra_kwargs,
+    )
+    return make_stage_local_gradient_transformation(optimizer, metadata=metadata, apply_fn=stage_local_apply)
 
 
 @register_scheduler("constant")
@@ -239,6 +306,36 @@ class AdamWOptimizer(OptimizerBuilder):
             weight_decay=0.0,
         )
 
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the AdamW stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise AdamW update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_adamw_stage_local,
+            **tx_kwargs,
+        )
+
 
 @register_optimizer("adafactor")
 @dataclasses.dataclass
@@ -292,6 +389,36 @@ class AdafactorOptimizer(OptimizerBuilder):
             factored=self.config.factored,
         )
 
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Adafactor stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise Adafactor update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_adafactor_stage_local,
+            **tx_kwargs,
+        )
+
 
 @register_optimizer("lion")
 @dataclasses.dataclass
@@ -334,6 +461,36 @@ class LionOptimizer(OptimizerBuilder):
             b1=self.config.b1,
             b2=self.config.b2,
             mu_dtype=self.config.mu_dtype,
+        )
+
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Lion stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise Lion update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_lion_stage_local,
+            **tx_kwargs,
         )
 
 
@@ -380,6 +537,36 @@ class RMSPropOptimizer(OptimizerBuilder):
             centered=False,
             momentum=self.config.momentum,
             nesterov=self.config.nesterov,
+        )
+
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the RMSProp stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise RMSProp update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_rmsprop_stage_local,
+            **tx_kwargs,
         )
 
 
@@ -436,6 +623,36 @@ class MuonOptimizer(OptimizerBuilder):
             adam_b1=self.config.adam_b1,
             adam_b2=self.config.adam_b2,
             adam_eps_root=self.config.adam_eps_root,
+        )
+
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Muon stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise Muon update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_muon_stage_local,
+            **tx_kwargs,
         )
 
 
@@ -498,6 +715,37 @@ class QuadOptimizer(OptimizerBuilder):
             noise_scale=self.config.noise_scale,
         )
 
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Quad stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise WhiteKron (Quad) update kernel to the optimizer
+        chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_quad_stage_local,
+            **tx_kwargs,
+        )
+
 
 @register_optimizer("skew")
 @dataclasses.dataclass
@@ -557,6 +805,37 @@ class SkewOptimizer(OptimizerBuilder):
             noise_scale=self.config.noise_scale,
         )
 
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Skew stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise WhiteKron (Skew) update kernel to the optimizer
+        chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_skew_stage_local,
+            **tx_kwargs,
+        )
+
 
 @register_optimizer("mars")
 @dataclasses.dataclass
@@ -602,4 +881,34 @@ class MarsOptimizer(OptimizerBuilder):
             gamma=self.config.gamma,
             eps=self.config.epsilon,
             max_grad_norm=self.config.max_grad_norm,
+        )
+
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the Mars stage-local optimizer for pipeline-parallel training.
+
+        Delegates to :func:`_build_metadata_mpmd_optimizer` to attach stage-local
+        metadata and a leafwise Mars update kernel to the optimizer chain.
+
+        Args:
+            scheduler: Learning rate schedule.
+            optimizer: Fully assembled optimizer chain from the factory.
+            **tx_kwargs: Factory-level transformation options.
+
+        Returns:
+            A :class:`StageLocalGradientTransformation` supporting both normal
+            Optax updates and stage-local PP updates.
+        """
+
+        return _build_metadata_mpmd_optimizer(
+            self.config,
+            scheduler,
+            optimizer=optimizer,
+            stage_local_apply=_apply_mars_stage_local,
+            **tx_kwargs,
         )

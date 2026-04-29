@@ -53,6 +53,48 @@ class OptimizerBuilder(ABC):
         """
         pass
 
+    def build_mpmd(
+        self,
+        scheduler: optax.Schedule,
+        *,
+        optimizer: optax.GradientTransformation,
+        **tx_kwargs: tp.Any,
+    ) -> optax.GradientTransformation:
+        """Build the MPMD/pipeline-parallel optimizer transformation.
+
+        Registered optimizers can override this hook to expose an explicit
+        stage-local update API for scheduled pipeline-parallel training while
+        preserving the normal :meth:`build` path for regular Optax use.
+
+        When overridden, this method should return a
+        :class:`StageLocalGradientTransformation` (or any
+        :class:`optax.GradientTransformation` whose ``update`` callable carries
+        a ``_eformer_stage_local_apply`` attribute) so that the factory can
+        dispatch stage-local gradient applications during PP training.
+
+        Args:
+            scheduler: Learning rate schedule paired with the optimizer.
+            optimizer: The fully assembled optimizer chain (clip, base, weight
+                decay, multi-step) produced by the factory.
+            **tx_kwargs: Factory-level transformation options such as
+                ``weight_decay``, ``weight_decay_mask``,
+                ``gradient_accumulation_steps``, and ``clip_grad``.
+
+        Returns:
+            A :class:`optax.GradientTransformation` that supports both the
+            standard ``update`` path and the stage-local ``apply_gradients_stage_local``
+            path when appropriate.
+
+        Raises:
+            NotImplementedError: By default, indicating that the optimizer does
+                not yet provide PP stage-local semantics.
+        """
+        del scheduler, optimizer, tx_kwargs
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement build_mpmd(...). "
+            "Override OptimizerBuilder.build_mpmd to provide PP stage-local optimizer semantics."
+        )
+
     def validate(self) -> None:  # noqa
         """
         Optional validation hook called before building the optimizer.

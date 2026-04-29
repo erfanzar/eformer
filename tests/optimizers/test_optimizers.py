@@ -43,11 +43,20 @@ from eformer.optimizers import (
     SchedulerFactory,
     SkewOptimizer,
     WhiteKronConfig,
+    make_stage_local_gradient_transformation,
     register_optimizer,
     register_scheduler,
 )
 from eformer.optimizers._base import _OPTIMIZER_BUILDER_REGISTRY, _SCHEDULER_BUILDER_REGISTRY
 from eformer.optimizers._tx import create_cosine_scheduler, create_linear_scheduler
+
+
+def _assert_tree_allclose(actual, expected, *, atol=1e-6, rtol=1e-6):
+    actual_leaves = jax.tree_util.tree_leaves(actual)
+    expected_leaves = jax.tree_util.tree_leaves(expected)
+    assert len(actual_leaves) == len(expected_leaves)
+    for actual_leaf, expected_leaf in zip(actual_leaves, expected_leaves, strict=True):
+        assert jnp.allclose(actual_leaf, expected_leaf, atol=atol, rtol=rtol)
 
 
 class TestSerializationMixin:
@@ -337,7 +346,8 @@ class TestOptimizerFactory:
             gradient_accumulation_steps=4,
         )
 
-        assert isinstance(optimizer, optax.MultiSteps)
+        assert isinstance(optimizer, optax.GradientTransformation)
+        assert hasattr(optimizer, "apply_gradients_stage_local")
 
     def test_create_skew_optimizer(self):
         scheduler_config = SchedulerConfig(learning_rate=0.001)
@@ -523,6 +533,195 @@ class TestBuilderPattern:
 
         assert jnp.allclose(no_decay_updates["w"], jnp.array([0.0]))
         assert jnp.allclose(decay_updates["w"], jnp.array([-0.5]))
+
+    @pytest.mark.parametrize(
+        ("optimizer_type", "optimizer_config"),
+        [
+            ("adamw", AdamWConfig()),
+            ("lion", LionConfig()),
+            ("rmsprop", RMSPropConfig()),
+            ("adafactor", AdafactorConfig()),
+            ("mars", MarsConfig(max_grad_norm=None)),
+            ("muon", MuonConfig()),
+            ("quad", WhiteKronConfig(dtype=jnp.float32, block_size=4, noise_scale=0.0)),
+            ("skew", WhiteKronConfig(dtype=jnp.float32, block_size=4, noise_scale=0.0)),
+        ],
+    )
+    def test_factory_stage_local_update_matches_optax_update(self, optimizer_type, optimizer_config):
+        """The explicit PP-safe optimizer API matches the normal Optax update."""
+        scheduler_config = SchedulerConfig(learning_rate=0.1)
+        params = {
+            "w": jnp.array([[1.0, -2.0], [0.5, -0.25]], dtype=jnp.float32),
+            "b": jnp.array([0.25, -0.5], dtype=jnp.float32),
+        }
+        grads = {
+            "w": jnp.array([[0.25, -0.5], [0.125, -0.25]], dtype=jnp.float32),
+            "b": jnp.array([0.05, -0.1], dtype=jnp.float32),
+        }
+
+        tx, scheduler = OptimizerFactory.create(
+            optimizer_type,
+            scheduler_config,
+            optimizer_config,
+            weight_decay=0.01,
+        )
+        assert hasattr(tx, "apply_gradients_stage_local")
+        expected_state_in = tx.init(params)
+        actual_state_in = tx.init(params)
+        expected_grads = jax.tree_util.tree_map(lambda x: x + jnp.asarray(0, x.dtype), grads)
+        actual_grads = jax.tree_util.tree_map(lambda x: x + jnp.asarray(0, x.dtype), grads)
+
+        updates, expected_state = tx.update(expected_grads, expected_state_in, params)
+        expected_params = optax.apply_updates(params, updates)
+        actual_params, actual_state = tx.apply_gradients_stage_local(
+            params=params,
+            grads=actual_grads,
+            opt_state=actual_state_in,
+            learning_rate_fn=scheduler,
+        )
+
+        _assert_tree_allclose(actual_params, expected_params, atol=1e-6, rtol=1e-6)
+        _assert_tree_allclose(actual_state, expected_state, atol=1e-6, rtol=1e-6)
+
+    def test_factory_stage_local_global_clip_matches_optax_update(self):
+        """Global clipping is applied explicitly before leafwise PP updates."""
+        scheduler_config = SchedulerConfig(learning_rate=0.1)
+        params = {"w": jnp.array([1.0, -2.0], dtype=jnp.float32)}
+        grads = {"w": jnp.array([10.0, -20.0], dtype=jnp.float32)}
+
+        tx, scheduler = OptimizerFactory.create(
+            "adamw",
+            scheduler_config,
+            AdamWConfig(),
+            clip_grad=1.0,
+        )
+        state = tx.init(params)
+        expected_grads = jax.tree_util.tree_map(lambda x: x + jnp.asarray(0, x.dtype), grads)
+        actual_grads = jax.tree_util.tree_map(lambda x: x + jnp.asarray(0, x.dtype), grads)
+        updates, expected_state = tx.update(expected_grads, state, params)
+        expected_params = optax.apply_updates(params, updates)
+        actual_params, actual_state = tx.apply_gradients_stage_local(
+            params=params,
+            grads=actual_grads,
+            opt_state=state,
+            learning_rate_fn=scheduler,
+        )
+
+        _assert_tree_allclose(actual_params, expected_params, atol=1e-6, rtol=1e-6)
+        _assert_tree_allclose(actual_state, expected_state, atol=1e-6, rtol=1e-6)
+
+    def test_stage_local_metadata_keeps_extra_kwargs(self):
+        """Unknown MPMD builder kwargs are preserved for optimizer extensions."""
+        scheduler = optax.constant_schedule(0.1)
+        builder = AdamWOptimizer(AdamWConfig())
+        optimizer = optax.chain(builder.build(scheduler))
+
+        tx = builder.build_mpmd(
+            scheduler,
+            optimizer=optimizer,
+            weight_decay=0.01,
+            custom_mpmd_option="enabled",
+        )
+        metadata = getattr(tx.update, "_eformer_stage_local_metadata")
+
+        assert metadata.weight_decay == 0.01
+        assert metadata.extra_kwargs == {"custom_mpmd_option": "enabled"}
+
+    def test_registered_optimizer_build_mpmd_hook_is_used(self):
+        """Custom registered optimizers can provide their own PP-safe apply path."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class CustomConfig:
+            pass
+
+        @register_optimizer("test_mpmd_custom")
+        @dataclasses.dataclass
+        class CustomOptimizer(OptimizerBuilder):
+            config: CustomConfig
+
+            def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                return optax.sgd(learning_rate=scheduler)
+
+            def build_mpmd(
+                self,
+                scheduler: optax.Schedule,
+                *,
+                optimizer: optax.GradientTransformation,
+                **tx_kwargs,
+            ) -> optax.GradientTransformation:
+                del scheduler, tx_kwargs
+
+                def apply_fn(
+                    *,
+                    params,
+                    grads,
+                    opt_state,
+                    learning_rate_fn=None,
+                    delete_grads: bool = False,
+                ):
+                    del learning_rate_fn, delete_grads
+                    updates, new_state = optimizer.update(grads, opt_state, params)
+                    return optax.apply_updates(params, updates), new_state
+
+                return make_stage_local_gradient_transformation(optimizer, apply_fn=apply_fn)
+
+        try:
+            scheduler_config = SchedulerConfig(learning_rate=0.1)
+            params = {"w": jnp.array([1.0, -2.0], dtype=jnp.float32)}
+            grads = {"w": jnp.array([0.25, -0.5], dtype=jnp.float32)}
+
+            tx, _scheduler = OptimizerFactory.create(
+                "test_mpmd_custom",
+                scheduler_config,
+                CustomConfig(),
+            )
+            state = tx.init(params)
+            updates, expected_state = tx.update(grads, state, params)
+            expected_params = optax.apply_updates(params, updates)
+            actual_params, actual_state = tx.apply_gradients_stage_local(
+                params=params,
+                grads=grads,
+                opt_state=state,
+            )
+
+            _assert_tree_allclose(actual_params, expected_params, atol=1e-6, rtol=1e-6)
+            _assert_tree_allclose(actual_state, expected_state, atol=1e-6, rtol=1e-6)
+        finally:
+            del _OPTIMIZER_BUILDER_REGISTRY["test_mpmd_custom"]
+
+    def test_registered_optimizer_without_build_mpmd_gets_clear_pp_error(self):
+        """Normal custom optimizers remain usable but fail loudly in PP mode."""
+        import dataclasses
+
+        @dataclasses.dataclass
+        class NoMpmdConfig:
+            pass
+
+        @register_optimizer("test_no_mpmd")
+        @dataclasses.dataclass
+        class NoMpmdOptimizer(OptimizerBuilder):
+            config: NoMpmdConfig
+
+            def build(self, scheduler: optax.Schedule) -> optax.GradientTransformation:
+                return optax.sgd(learning_rate=scheduler)
+
+        try:
+            params = {"w": jnp.array([1.0], dtype=jnp.float32)}
+            grads = {"w": jnp.array([0.25], dtype=jnp.float32)}
+            tx, _scheduler = OptimizerFactory.create(
+                "test_no_mpmd",
+                SchedulerConfig(learning_rate=0.1),
+                NoMpmdConfig(),
+            )
+            state = tx.init(params)
+            updates, _ = tx.update(grads, state, params)
+            updated = optax.apply_updates(params, updates)
+            assert jnp.allclose(updated["w"], jnp.array([0.975], dtype=jnp.float32))
+            with pytest.raises(NotImplementedError, match="build_mpmd"):
+                tx.apply_gradients_stage_local(params=params, grads=grads, opt_state=state)
+        finally:
+            del _OPTIMIZER_BUILDER_REGISTRY["test_no_mpmd"]
 
     def test_lion_builder_build(self):
         """Test LionOptimizer builder builds correct transformation."""

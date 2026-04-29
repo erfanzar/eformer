@@ -88,6 +88,11 @@ from ._config import (
     WhiteKronConfig,
 )
 from ._factory import OptimizerFactory, SchedulerFactory
+from ._stage_local import (
+    StageLocalGradientTransformation,
+    StageLocalOptimizerMetadata,
+    make_stage_local_gradient_transformation,
+)
 
 __all__ = (
     "AdafactorConfig",
@@ -116,7 +121,10 @@ __all__ = (
     "SerializationMixin",
     "SkewOptimizer",
     "SoapConfig",
+    "StageLocalGradientTransformation",
+    "StageLocalOptimizerMetadata",
     "WhiteKronConfig",
+    "make_stage_local_gradient_transformation",
     "register_optimizer",
     "register_scheduler",
 )
