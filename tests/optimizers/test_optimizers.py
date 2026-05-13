@@ -622,7 +622,7 @@ class TestBuilderPattern:
             weight_decay=0.01,
             custom_mpmd_option="enabled",
         )
-        metadata = getattr(tx.update, "_eformer_stage_local_metadata")
+        metadata = tx.update._eformer_stage_local_metadata
 
         assert metadata.weight_decay == 0.01
         assert metadata.extra_kwargs == {"custom_mpmd_option": "enabled"}
